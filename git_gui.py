@@ -1,4 +1,4 @@
-"""图形化 Git：点击按钮自动执行常用 Git 命令，下方实时显示原版命令行输出。
+"""图形化 Git：多标签页，每个标签独立管理一个 Git 项目。
 
 运行方式: python git_gui.py
 """
@@ -7,14 +7,12 @@ import os
 import queue
 import shlex
 import subprocess
-
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))
-
 
 
 def run_git(repo, args, timeout=60):
@@ -34,42 +32,42 @@ def run_git(repo, args, timeout=60):
     return display, text, proc.returncode
 
 
-class GitGUI:
-    def __init__(self, root):
+class RepoPanel:
+    def __init__(self, parent, root, repo_path):
         self.root = root
-        root.title("图形化 Git")
-        root.geometry("960x920")
-        root.minsize(800, 700)
+        self.path_var = tk.StringVar(value=repo_path)
         self._result_q = queue.Queue()
         self._refresh_q = queue.Queue()
         self._cmd_history = []
         self._cmd_hist_idx = 0
-        self._build_top()
-        self._build_buttons()
-        self._build_graph()
-        self._build_files()
-        self._build_output()
+        self._build(parent)
         self.refresh_status()
         self.cmd_entry.focus_set()
         self.root.after(100, self._poll_queue)
         self.root.after(2000, self._auto_refresh)
 
-    def _build_top(self):
-        top = ttk.Frame(self.root)
+    def _build(self, parent):
+        self._build_top(parent)
+        self._build_buttons(parent)
+        self._build_graph(parent)
+        self._build_files(parent)
+        self._build_output(parent)
+
+    def _build_top(self, parent):
+        top = ttk.Frame(parent)
         top.pack(fill="x", padx=8, pady=(8, 0))
         ttk.Label(top, text="仓库路径:").pack(side="left")
-        self.path_var = tk.StringVar(value=DEFAULT_DIR)
         ttk.Entry(top, textvariable=self.path_var).pack(
             side="left", fill="x", expand=True, padx=6)
         ttk.Button(top, text="浏览…", command=self.choose_dir).pack(side="left")
         ttk.Button(top, text="刷新", command=self.refresh_status).pack(
             side="left", padx=(4, 0))
         self.state_var = tk.StringVar(value="就绪")
-        ttk.Label(self.root, textvariable=self.state_var,
+        ttk.Label(parent, textvariable=self.state_var,
                   foreground="#606060").pack(anchor="w", padx=10, pady=(2, 0))
 
-    def _build_buttons(self):
-        box = ttk.LabelFrame(self.root, text="点击按钮执行 Git 命令")
+    def _build_buttons(self, parent):
+        box = ttk.LabelFrame(parent, text="点击按钮执行 Git 命令")
         box.pack(fill="x", padx=8, pady=4)
         rows = [
             [("查看状态", self.run_status),
@@ -103,9 +101,9 @@ class GitGUI:
                 ttk.Button(frame, text=text, width=16, command=cmd).pack(
                     side="left", padx=3)
 
-    def _build_files(self):
+    def _build_files(self, parent):
         box = ttk.LabelFrame(
-            self.root, text="变更文件（选中后可“暂存选中”，双击查看改动）")
+            parent, text='变更文件（选中后可"暂存选中"，双击查看改动）')
         box.pack(fill="x", padx=8, pady=4)
         self.branch_label = ttk.Label(box, text="当前分支: -")
         self.branch_label.pack(anchor="w", padx=6, pady=(4, 0))
@@ -118,9 +116,8 @@ class GitGUI:
         self.file_list.pack(side="left", fill="x", expand=True)
         self.file_list.bind("<Double-Button-1>", self.show_diff)
 
-    def _build_output(self):
-        box = ttk.LabelFrame(
-            self.root, text="Git 命令行输出")
+    def _build_output(self, parent):
+        box = ttk.LabelFrame(parent, text="Git 命令行输出")
         box.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         self.output = tk.Text(
             box, height=8, state="disabled", wrap="none", relief="flat",
@@ -306,7 +303,7 @@ class GitGUI:
             self.file_list.insert("end", f)
         self.refresh_graph()
 
-    def _build_graph(self):
+    def _build_graph(self, parent):
         self._graph_commits = []
         self._graph_lanes = {}
         self._graph_rows = {}
@@ -314,7 +311,7 @@ class GitGUI:
         self._selected = None
         self._graph_font = tkfont.Font(family="Microsoft YaHei UI", size=9)
         box = ttk.LabelFrame(
-            self.root,
+            parent,
             text="版本历史图（单击选中提交，右键：详情 / 回滚 / 检出；橙=HEAD 绿=分支）")
         box.pack(fill="x", padx=8, pady=4)
         frame = ttk.Frame(box)
@@ -533,7 +530,7 @@ class GitGUI:
             return
         if require_repo and not self.is_repo(repo):
             messagebox.showwarning(
-                "提示", f"“{repo}”不是 Git 仓库。\n请先点击“初始化仓库”或“克隆仓库”。")
+                "提示", f'“{repo}”不是 Git 仓库。\n请先点击“初始化仓库”或“克隆仓库”。')
             return
         if confirm and not messagebox.askyesno("确认操作", confirm):
             return
@@ -595,7 +592,7 @@ class GitGUI:
     def add_selected(self):
         sel = self.file_list.curselection()
         if not sel:
-            messagebox.showinfo("提示", "请先在“变更文件”列表中选中文件。")
+            messagebox.showinfo("提示", '请先在"变更文件"列表中选中文件。')
             return
         self.run(["add", "--", self._file_name(sel[0])])
 
@@ -815,6 +812,46 @@ class GitGUI:
         box.focus_set()
         win.wait_window()
         return result[0] if result else None
+
+
+class GitGUI:
+    def __init__(self, root):
+        self.root = root
+        root.title("图形化 Git")
+        root.geometry("960x920")
+        root.minsize(800, 700)
+        top = ttk.Frame(root)
+        top.pack(fill="x", padx=8, pady=(8, 0))
+        ttk.Button(top, text="+ 新建项目标签",
+                   command=self._new_tab).pack(side="left")
+        ttk.Button(top, text="× 关闭当前标签",
+                   command=self._close_tab).pack(side="left", padx=4)
+        self.nb = ttk.Notebook(root)
+        self.nb.pack(fill="both", expand=True, padx=8, pady=4)
+        self._panels = {}
+        self._new_tab(DEFAULT_DIR)
+
+    def _new_tab(self, path=None):
+        if path is None:
+            path = filedialog.askdirectory(initialdir=DEFAULT_DIR)
+            if not path:
+                return
+        frame = ttk.Frame(self.nb)
+        panel = RepoPanel(frame, self.root, path)
+        name = os.path.basename(path) or path
+        self.nb.add(frame, text=name)
+        self.nb.select(frame)
+        self._panels[str(frame)] = panel
+
+    def _close_tab(self):
+        current = self.nb.select()
+        if current is None:
+            return
+        if self.nb.index("end") <= 1:
+            messagebox.showinfo("提示", "至少保留一个标签页。")
+            return
+        self.nb.forget(current)
+        self._panels.pop(str(current), None)
 
 
 def main():
