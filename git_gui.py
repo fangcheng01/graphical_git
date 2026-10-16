@@ -811,8 +811,7 @@ class RepoPanel:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 original = f.read()
             resolved = resolve(original)
-            with open(path, "w", encoding="utf-8", errors="replace") as f:
-                f.write(resolved)
+
             file_results.append((rel, original, resolved))
             self.append_output(f"── 冲突文件: {rel} ──\n", "fail")
             self.append_output("【原始内容】\n")
@@ -879,8 +878,13 @@ class RepoPanel:
 
         ttk.Button(btns, text="接受修改", command=accept).pack(side="left", padx=6)
         ttk.Button(btns, text="放弃修改", command=discard).pack(side="left", padx=6)
+        win.protocol("WM_DELETE_WINDOW", discard)
         win.wait_window()
         if result and result[0] == "accept":
+            for rel, _orig, new in file_results:
+                path = os.path.join(repo, rel)
+                with open(path, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(new)
             self.run(["add"] + names, repo=repo)
             self.append_output("已暂存所有自动解决冲突的文件，请点击「提交」完成合并。\n\n", "ok")
         elif result and result[0] == "discard":
