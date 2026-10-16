@@ -7,7 +7,7 @@ import os
 import queue
 import shlex
 import subprocess
-import tempfile
+
 import threading
 import time
 import tkinter as tk
@@ -157,16 +157,11 @@ class GitGUI:
         self.root.after(
             800, lambda: setattr(self, "_terminal_opening", False))
         try:
-            bat_path = os.path.join(
-                tempfile.gettempdir(), "git_gui_terminal.bat")
-            with open(bat_path, "w", encoding="ascii", errors="replace") as f:
-                f.write("@echo off\n")
-                f.write("title Git Terminal\n")
-                f.write(f'cd /d "{repo}"\n')
-                f.write("echo Git terminal ready. Current dir: %cd%\n")
-                f.write("echo.\n")
-                f.write("cmd /k\n")
-            os.startfile(bat_path)
+            import ctypes
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None, "open", "cmd.exe", "/k", repo, 1)
+            if ret <= 32:
+                raise OSError(f"ShellExecuteW 返回错误码 {ret}")
             self.append_output(
                 f"[已打开 Git 命令行终端，目录: {repo}]\n"
                 "在终端中输入 git 命令，图形化视图会自动同步显示结果。\n\n",
