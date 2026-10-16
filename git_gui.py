@@ -14,47 +14,6 @@ from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-GIT_COMMANDS = [
-    ("git status", "查看工作区状态"),
-    ("git status -s", "简短状态"),
-    ("git add .", "暂存全部改动"),
-    ("git add <文件>", "暂存指定文件"),
-    ("git commit -m \"提交信息\"", "提交"),
-    ("git commit --amend", "修改上次提交"),
-    ("git log --oneline --graph --all", "图形化查看日志"),
-    ("git log -5", "查看最近5条提交"),
-    ("git diff", "查看未暂存改动"),
-    ("git diff --cached", "查看已暂存改动"),
-    ("git show <提交>", "查看某次提交详情"),
-    ("git branch -a", "查看所有分支"),
-    ("git branch <名字>", "创建分支"),
-    ("git switch <分支>", "切换分支"),
-    ("git switch -c <分支>", "新建并切换分支"),
-    ("git merge <分支>", "合并分支"),
-    ("git merge --no-ff <分支>", "合并并生成合并提交"),
-    ("git merge --abort", "中止合并"),
-    ("git rebase <分支>", "变基"),
-    ("git reset --soft HEAD~1", "撤销上次提交(保留改动)"),
-    ("git reset --hard <提交>", "硬回滚(危险)"),
-    ("git revert <提交>", "生成反向提交抵消"),
-    ("git stash push", "暂存工作区"),
-    ("git stash pop", "弹出暂存"),
-    ("git stash list", "查看暂存列表"),
-    ("git remote -v", "查看远程仓库"),
-    ("git remote add origin <地址>", "添加远程仓库"),
-    ("git push", "推送到远程"),
-    ("git push -u origin <分支>", "推送并关联远程分支"),
-    ("git pull", "拉取远程更新"),
-    ("git fetch", "获取远程更新"),
-    ("git tag", "查看标签"),
-    ("git tag <名字>", "创建标签"),
-    ("git checkout -- <文件>", "丢弃文件改动"),
-    ("git clean -fd", "删除未跟踪文件(危险)"),
-]
-
-IGNORE_KEYS = ("Up", "Down", "Return", "Tab", "Escape", "Left", "Right",
-               "Home", "End", "Shift_L", "Shift_R", "Control_L",
-               "Control_R", "Alt_L", "Alt_R")
 
 
 def run_git(repo, args, timeout=60):
@@ -88,6 +47,7 @@ class GitGUI:
         self._build_output()
         self.refresh_status()
         self.root.after(100, self._poll_queue)
+        self.root.after(2000, self._auto_refresh)
 
     def _build_top(self):
         top = ttk.Frame(self.root)
@@ -155,179 +115,56 @@ class GitGUI:
 
     def _build_output(self):
         box = ttk.LabelFrame(
-            self.root,
-            text="Git 命令行（可直接输入命令，输入时自动提示；↑↓ 历史，Tab 补全）")
+            self.root, text="Git 命令行输出（点击下方绿条打开 Git 终端）")
         box.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         self.output = tk.Text(
             box, height=8, state="disabled", wrap="none", relief="flat",
             bg="#1e1e1e", fg="#dcdcdc", font=("Consolas", 10))
         scroll = ttk.Scrollbar(box, command=self.output.yview)
         self.output.configure(yscrollcommand=scroll.set)
-        entry_row = ttk.Frame(box)
-        entry_row.pack(side="bottom", fill="x", padx=4, pady=(4, 6))
-        ttk.Label(entry_row, text="$", foreground="#6ee06e").pack(side="left")
-        self.cmd_entry = ttk.Entry(entry_row, font=("Consolas", 10))
-        self.cmd_entry.pack(side="left", fill="x", expand=True, padx=4)
-        ttk.Button(entry_row, text="执行", command=self.exec_input).pack(
-            side="left")
+        term_bar = tk.Frame(box, bg="#2d2d2d", height=30)
+        term_bar.pack(side="bottom", fill="x")
+        term_bar.pack_propagate(False)
+        tip = tk.Label(
+            term_bar,
+            text="▶  点击此处打开 Git 命令行终端（在终端中输入命令，"
+                 "图形化视图会自动同步显示结果）",
+            bg="#2d2d2d", fg="#6ee06e", font=("Microsoft YaHei UI", 9),
+            padx=10, pady=4)
+        tip.pack(side="left")
+        tip.bind("<Button-1>", self.open_terminal)
+        term_bar.bind("<Button-1>", self.open_terminal)
         scroll.pack(side="right", fill="y")
         self.output.pack(side="left", fill="both", expand=True)
         self.output.tag_configure("cmd", foreground="#7ec8ff")
         self.output.tag_configure("ok", foreground="#6ee06e")
         self.output.tag_configure("fail", foreground="#ff7070")
-        self.suggest_box = tk.Listbox(
-            box, height=6, font=("Consolas", 9), bg="#fffbe6", fg="#333333",
-            relief="flat", highlightthickness=1,
-            highlightbackground="#d0d0d0")
-        self.suggest_box.bind("<ButtonRelease-1>", self._on_suggest_click)
-        self._history = []
-        self._hist_idx = None
-        self._sug_cmds = []
-        self._sug_idx = 0
-        self.cmd_entry.bind("<Return>", self._on_return)
-        self.cmd_entry.bind("<Tab>", self._on_tab)
-        self.cmd_entry.bind("<Up>", self._on_up)
-        self.cmd_entry.bind("<Down>", self._on_down)
-        self.cmd_entry.bind("<Escape>", lambda e: self._hide_suggest())
-        self.cmd_entry.bind("<KeyRelease>", self._update_suggest)
         self.append_output(
-            "点击上方按钮执行命令，或在 $ 输入框直接输入 git 命令后回车，"
-            "此处显示真实的命令与输出。\n\n")
+            "点击上方按钮执行命令，或点击下方绿条打开 Git 终端直接输入命令，"
+            "图形化视图会自动同步。\n\n")
 
-    def _update_suggest(self, event):
-        if event.keysym in IGNORE_KEYS:
+    def open_terminal(self, _event=None):
+        repo = self.path_var.get().strip()
+        if not repo or not os.path.isdir(repo):
+            messagebox.showwarning("提示", "请先在上方选择一个有效的目录。")
             return
-        q = self.cmd_entry.get().strip()
-        if q.lower().startswith("git"):
-            q = q[3:].lstrip()
-        if not q:
-            self._hide_suggest()
-            return
-        ql = q.lower()
-        starts, contains = [], []
-        for cmd, desc in GIT_COMMANDS:
-            body = cmd[4:]
-            if body.startswith(ql):
-                starts.append((cmd, desc))
-            elif ql in body:
-                contains.append((cmd, desc))
-        picked = (starts + contains)[:8]
-        if not picked:
-            self._hide_suggest()
-            return
-        self._sug_cmds = [c for c, _ in picked]
-        self._sug_idx = 0
-        self.suggest_box.delete(0, "end")
-        for cmd, desc in picked:
-            self.suggest_box.insert("end", f"{cmd}    {desc}")
-        self.suggest_box.selection_clear(0, "end")
-        self.suggest_box.selection_set(0)
-        self.suggest_box.see(0)
-        if not self.suggest_box.winfo_ismapped():
-            self.suggest_box.pack(side="bottom", fill="x", padx=6, pady=(0, 2))
-
-    def _hide_suggest(self):
-        if self.suggest_box.winfo_ismapped():
-            self.suggest_box.pack_forget()
-        self._sug_cmds = []
-        self._sug_idx = 0
-
-    def _pick_suggest(self):
-        if not self._sug_cmds:
-            return
-        idx = min(max(self._sug_idx, 0), len(self._sug_cmds) - 1)
-        cmd = self._sug_cmds[idx]
-        self.cmd_entry.delete(0, "end")
-        self.cmd_entry.insert(0, cmd)
-        self.cmd_entry.icursor("end")
-        self._hide_suggest()
-        self.cmd_entry.focus_set()
-
-    def _on_suggest_click(self, event):
-        idx = self.suggest_box.nearest(event.y)
-        if 0 <= idx < len(self._sug_cmds):
-            self._sug_idx = idx
-            self._pick_suggest()
-
-    def _on_return(self, _event=None):
-        if self.suggest_box.winfo_ismapped() and self._sug_cmds:
-            self._pick_suggest()
-            return "break"
-        self.exec_input()
-        return "break"
-
-    def _on_tab(self, _event=None):
-        if self.suggest_box.winfo_ismapped() and self._sug_cmds:
-            self._pick_suggest()
-        return "break"
-
-    def _on_up(self, _event=None):
-        if self.suggest_box.winfo_ismapped() and self._sug_cmds:
-            self._sug_idx = max(0, self._sug_idx - 1)
-            self.suggest_box.selection_clear(0, "end")
-            self.suggest_box.selection_set(self._sug_idx)
-            self.suggest_box.see(self._sug_idx)
-            return "break"
-        self._hist_prev()
-        return "break"
-
-    def _on_down(self, _event=None):
-        if self.suggest_box.winfo_ismapped() and self._sug_cmds:
-            self._sug_idx = min(len(self._sug_cmds) - 1, self._sug_idx + 1)
-            self.suggest_box.selection_clear(0, "end")
-            self.suggest_box.selection_set(self._sug_idx)
-            self.suggest_box.see(self._sug_idx)
-            return "break"
-        self._hist_next()
-        return "break"
-
-    def _hist_prev(self):
-        if not self._history:
-            return
-        if self._hist_idx is None:
-            self._hist_idx = len(self._history)
-        self._hist_idx = max(0, self._hist_idx - 1)
-        self.cmd_entry.delete(0, "end")
-        self.cmd_entry.insert(0, self._history[self._hist_idx])
-        self.cmd_entry.icursor("end")
-
-    def _hist_next(self):
-        if self._hist_idx is None:
-            return
-        self._hist_idx += 1
-        self.cmd_entry.delete(0, "end")
-        if self._hist_idx >= len(self._history):
-            self._hist_idx = None
-        else:
-            self.cmd_entry.insert(0, self._history[self._hist_idx])
-        self.cmd_entry.icursor("end")
-
-    def exec_input(self):
-        raw = self.cmd_entry.get().strip()
-        if not raw:
-            return
-        self._hide_suggest()
-        self.cmd_entry.delete(0, "end")
-        self._history.append(raw)
-        self._hist_idx = None
         try:
-            parts = shlex.split(raw)
-        except ValueError:
-            parts = raw.split()
-        if parts and parts[0].lower() == "git":
-            parts = parts[1:]
-        if not parts:
+            flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            subprocess.Popen(
+                ["cmd.exe", "/k"], cwd=repo, creationflags=flags)
+            self.append_output(
+                f"[已打开 Git 命令行终端，目录: {repo}]\n"
+                "在终端中输入 git 命令，图形化视图会自动同步显示结果。\n\n",
+                "cmd")
+        except Exception as exc:
+            messagebox.showerror("错误", f"无法打开终端: {exc}")
+
+    def _auto_refresh(self):
+        try:
+            self.refresh_status()
+        except tk.TclError:
             return
-        joined = " ".join(parts)
-        confirm = None
-        for kw in ("reset --hard", "push --force", "push -f", "clean",
-                   "filter-branch"):
-            if kw in joined:
-                confirm = (f"命令包含危险操作「{kw}」，确定执行？\n\n"
-                           f"命令: git {joined}")
-                break
-        slow = parts[0] in ("push", "pull", "fetch", "clone")
-        self.run(parts, slow=slow, confirm=confirm)
+        self.root.after(2000, self._auto_refresh)
 
     def append_output(self, msg, tag=None):
         self.output.configure(state="normal")
