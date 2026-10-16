@@ -70,36 +70,82 @@ class RepoPanel:
         box = ttk.LabelFrame(parent, text="点击按钮执行 Git 命令")
         box.pack(fill="x", padx=8, pady=4)
         rows = [
-            [("查看状态", self.run_status),
-             ("暂存全部", lambda: self.run(["add", "."])),
-             ("暂存选中", self.add_selected),
-             ("取消暂存", lambda: self.run(["reset"])),
-             ("提交", self.commit),
-             ("修改上次提交", self.amend)],
+            [("查看状态", self.run_status,
+              "git status", "显示工作区状态：变更、暂存、未跟踪文件"),
+             ("暂存全部", lambda: self.run(["add", "."]),
+              "git add .", "将所有改动加入暂存区"),
+             ("暂存选中", self.add_selected,
+              "git add <file>", "将选中的文件加入暂存区"),
+             ("取消暂存", lambda: self.run(["reset"]),
+              "git reset", "将暂存区文件移回工作区"),
+             ("提交", self.commit,
+              "git commit -m <msg>", "提交暂存区改动到仓库"),
+             ("修改上次提交", self.amend,
+              "git commit --amend", "修改上一次提交的内容或信息")],
             [("查看日志", lambda: self.run(
-                ["log", "--oneline", "--graph", "--all", "-20"])),
-             ("查看分支", lambda: self.run(["branch", "-a"])),
-             ("新建并切换分支", self.create_branch),
-             ("切换分支", self.switch_branch),
-             ("合并分支", self.merge_branch),
-             ("中止合并", self.abort_merge)],
-            [("拉取", lambda: self.run(["pull"], slow=True)),
-             ("推送", lambda: self.run(["push"], slow=True)),
-             ("查看远程", lambda: self.run(["remote", "-v"])),
-             ("初始化仓库", lambda: self.run(["init"], require_repo=False)),
-             ("克隆仓库", self.clone)],
-            [("暂存改动(stash)", lambda: self.run(["stash", "push"])),
-             ("弹出暂存", lambda: self.run(["stash", "pop"])),
-             ("撤销上次提交", self.reset_soft),
-             ("丢弃改动", self.discard_changes),
-             ("清空输出", self.clear_output)],
+                ["log", "--oneline", "--graph", "--all", "-20"]),
+              "git log --oneline --graph --all -20", "显示最近20条提交历史"),
+             ("查看分支", lambda: self.run(["branch", "-a"]),
+              "git branch -a", "列出所有本地和远程分支"),
+             ("新建并切换分支", self.create_branch,
+              "git switch -c <name>", "创建新分支并切换到该分支"),
+             ("切换分支", self.switch_branch,
+              "git switch <name>", "切换到指定分支"),
+             ("合并分支", self.merge_branch,
+              "git merge <branch>", "将指定分支合并到当前分支"),
+             ("中止合并", self.abort_merge,
+              "git merge --abort", "放弃当前合并，恢复到合并前状态")],
+            [("拉取", lambda: self.run(["pull"], slow=True),
+              "git pull", "从远程仓库拉取并合并改动"),
+             ("推送", lambda: self.run(["push"], slow=True),
+              "git push", "将本地提交推送到远程仓库"),
+             ("查看远程", lambda: self.run(["remote", "-v"]),
+              "git remote -v", "显示远程仓库地址"),
+             ("初始化仓库", lambda: self.run(["init"], require_repo=False),
+              "git init", "在当前目录初始化 Git 仓库"),
+             ("克隆仓库", self.clone,
+              "git clone <url>", "从远程地址克隆仓库")],
+            [("暂存改动(stash)", lambda: self.run(["stash", "push"]),
+              "git stash push", "临时保存工作区改动"),
+             ("弹出暂存", lambda: self.run(["stash", "pop"]),
+              "git stash pop", "恢复最近一次 stash 的改动"),
+             ("撤销上次提交", self.reset_soft,
+              "git reset --soft HEAD~1", "撤销上次提交，保留改动在暂存区"),
+             ("丢弃改动", self.discard_changes,
+              "git restore .", "丢弃所有未提交的改动"),
+             ("清空输出", self.clear_output,
+              "", "清空命令行输出区")],
         ]
         for row in rows:
             frame = ttk.Frame(box)
             frame.pack(fill="x", padx=6, pady=3)
-            for text, cmd in row:
-                ttk.Button(frame, text=text, width=16, command=cmd).pack(
-                    side="left", padx=3)
+            for text, cmd, git_cmd, desc in row:
+                btn = ttk.Button(frame, text=text, width=16, command=cmd)
+                btn.pack(side="left", padx=3)
+                self._add_tooltip(btn, git_cmd, desc)
+
+    def _add_tooltip(self, widget, git_cmd, desc):
+        tip = git_cmd + "\n" + desc if git_cmd else desc
+
+        def on_enter(event):
+            x, y = event.x_root + 14, event.y_root + 10
+            tw = tk.Toplevel(self.root)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f"+{x}+{y}")
+            tk.Label(
+                tw, text=tip, justify="left", background="#ffffe0",
+                relief="solid", borderwidth=1,
+                font=("Microsoft YaHei UI", 9), padx=6, pady=4).pack()
+            widget._tooltip = tw
+
+        def on_leave(_event):
+            tw = getattr(widget, "_tooltip", None)
+            if tw:
+                tw.destroy()
+                widget._tooltip = None
+
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
 
     def _build_files(self, parent):
         box = ttk.LabelFrame(
