@@ -7,6 +7,7 @@ import os
 import queue
 import shlex
 import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -40,6 +41,8 @@ class GitGUI:
         root.geometry("960x920")
         root.minsize(800, 700)
         self._result_q = queue.Queue()
+        self._refresh_q = queue.Queue()
+        self._terminal_opening = False
         self._build_top()
         self._build_buttons()
         self._build_graph()
@@ -144,14 +147,26 @@ class GitGUI:
             "图形化视图会自动同步。\n\n")
 
     def open_terminal(self, _event=None):
+        if self._terminal_opening:
+            return
         repo = self.path_var.get().strip()
         if not repo or not os.path.isdir(repo):
             messagebox.showwarning("提示", "请先在上方选择一个有效的目录。")
             return
+        self._terminal_opening = True
+        self.root.after(
+            800, lambda: setattr(self, "_terminal_opening", False))
         try:
-            flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-            subprocess.Popen(
-                ["cmd.exe", "/k"], cwd=repo, creationflags=flags)
+            bat_path = os.path.join(
+                tempfile.gettempdir(), "git_gui_terminal.bat")
+            with open(bat_path, "w", encoding="ascii", errors="replace") as f:
+                f.write("@echo off\n")
+                f.write("title Git Terminal\n")
+                f.write(f'cd /d "{repo}"\n')
+                f.write("echo Git terminal ready. Current dir: %cd%\n")
+                f.write("echo.\n")
+                f.write("cmd /k\n")
+            os.startfile(bat_path)
             self.append_output(
                 f"[已打开 Git 命令行终端，目录: {repo}]\n"
                 "在终端中输入 git 命令，图形化视图会自动同步显示结果。\n\n",
@@ -161,10 +176,86 @@ class GitGUI:
 
     def _auto_refresh(self):
         try:
-            self.refresh_status()
+            self._refresh_async()
         except tk.TclError:
             return
         self.root.after(2000, self._auto_refresh)
+
+    def _refresh_async(self):
+        repo = self.path_var.get().strip()
+
+        def worker():
+            try:
+                data = self._gather_refresh(repo)
+                self._refresh_q.put(data)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _gather_refresh(self, repo):
+        data = {"branch": "（不是 Git 仓库）", "files": [],
+                "commits": [], "lanes": {}, "rows": {}}
+        if not repo or not os.path.isdir(repo):
+            return data
+        if not self.is_repo(repo):
+            return data
+        _, out, code = run_git(repo, ["status", "-z", "--porcelain"])
+        if code == 0:
+            _, bout, bcode = run_git(repo, ["branch", "--show-current"])
+            b = bout.strip() if bcode == 0 else ""
+            data["branch"] = b if b else "（空仓库，还没有提交）"
+            data["files"] = [f"{e[:2]}  {e[3:]}"
+                             for e in out.split("\x00") if len(e) > 3]
+        _, lout, lcode = run_git(repo, [
+            "log", "--all", "--topo-order", "--max-count=200",
+            "--pretty=format:%H%x00%h%x00%s%x00%P%x00%d"])
+        if lcode == 0 and lout.strip():
+            commits = []
+            for line in lout.split("\n"):
+                parts = line.split("\x00")
+                if len(parts) >= 5:
+                    commits.append({
+                        "hash": parts[0], "short": parts[1],
+                        "subject": parts[2],
+                        "parents": parts[3].split() if parts[3] else [],
+                        "refs": parts[4].strip(" ()"),
+                    })
+            waiting = {}
+            next_lane = 0
+            lanes = {}
+            for c in commits:
+                q = waiting.get(c["hash"])
+                if q:
+                    lane = q.pop(0)
+                    if not q:
+                        del waiting[c["hash"]]
+                else:
+                    lane = next_lane
+                    next_lane += 1
+                lanes[c["hash"]] = lane
+                for i, p in enumerate(c["parents"]):
+                    if i == 0:
+                        waiting.setdefault(p, []).append(lane)
+                    else:
+                        waiting.setdefault(p, []).append(next_lane)
+                        next_lane += 1
+            data["commits"] = commits
+            data["lanes"] = lanes
+            data["rows"] = {c["hash"]: i for i, c in enumerate(commits)}
+        return data
+
+    def _apply_refresh(self, data):
+        self.branch_label.configure(
+            text=f"当前分支: {data['branch']}    变更文件: {len(data['files'])} 个")
+        self.file_list.delete(0, "end")
+        for f in data["files"]:
+            self.file_list.insert("end", f)
+        self._graph_commits = data["commits"]
+        self._graph_lanes = data["lanes"]
+        self._graph_rows = data["rows"]
+        self._selected = None
+        self._draw_graph()
 
     def append_output(self, msg, tag=None):
         self.output.configure(state="normal")
@@ -447,11 +538,16 @@ class GitGUI:
                     f"—— 结果: {'成功' if ok else '失败'} ——\n\n",
                     "ok" if ok else "fail")
                 self.state_var.set("就绪")
-                self.refresh_status()
+                self._refresh_async()
                 if args and args[0] == "merge" and not ok:
                     self._check_merge_conflict(repo)
                 if on_success and ok:
                     on_success()
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                self._apply_refresh(self._refresh_q.get_nowait())
         except queue.Empty:
             pass
         self.root.after(100, self._poll_queue)
