@@ -42,13 +42,15 @@ class GitGUI:
         root.minsize(800, 700)
         self._result_q = queue.Queue()
         self._refresh_q = queue.Queue()
-        self._terminal_opening = False
+        self._cmd_history = []
+        self._cmd_hist_idx = 0
         self._build_top()
         self._build_buttons()
         self._build_graph()
         self._build_files()
         self._build_output()
         self.refresh_status()
+        self.cmd_entry.focus_set()
         self.root.after(100, self._poll_queue)
         self.root.after(2000, self._auto_refresh)
 
@@ -118,56 +120,60 @@ class GitGUI:
 
     def _build_output(self):
         box = ttk.LabelFrame(
-            self.root, text="Git 命令行输出（点击下方绿条打开 Git 终端）")
+            self.root, text="Git 命令行输出")
         box.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         self.output = tk.Text(
             box, height=8, state="disabled", wrap="none", relief="flat",
             bg="#1e1e1e", fg="#dcdcdc", font=("Consolas", 10))
         scroll = ttk.Scrollbar(box, command=self.output.yview)
         self.output.configure(yscrollcommand=scroll.set)
-        term_bar = tk.Frame(box, bg="#2d2d2d", height=30)
-        term_bar.pack(side="bottom", fill="x")
-        term_bar.pack_propagate(False)
-        tip = tk.Label(
-            term_bar,
-            text="▶  点击此处打开 Git 命令行终端（在终端中输入命令，"
-                 "图形化视图会自动同步显示结果）",
-            bg="#2d2d2d", fg="#6ee06e", font=("Microsoft YaHei UI", 9),
-            padx=10, pady=4)
-        tip.pack(side="left")
-        tip.bind("<Button-1>", self.open_terminal)
-        term_bar.bind("<Button-1>", self.open_terminal)
+        cmd_bar = ttk.Frame(box)
+        cmd_bar.pack(side="bottom", fill="x")
+        ttk.Label(cmd_bar, text="git>", font=("Consolas", 10)).pack(
+            side="left", padx=(4, 2))
+        self.cmd_var = tk.StringVar()
+        self.cmd_entry = ttk.Entry(cmd_bar, textvariable=self.cmd_var)
+        self.cmd_entry.pack(side="left", fill="x", expand=True, padx=2)
+        self.cmd_entry.bind("<Return>", self._run_command)
+        self.cmd_entry.bind("<Up>", self._cmd_history_prev)
+        self.cmd_entry.bind("<Down>", self._cmd_history_next)
+        ttk.Button(cmd_bar, text="执行", command=self._run_command).pack(
+            side="left", padx=2)
         scroll.pack(side="right", fill="y")
         self.output.pack(side="left", fill="both", expand=True)
         self.output.tag_configure("cmd", foreground="#7ec8ff")
         self.output.tag_configure("ok", foreground="#6ee06e")
         self.output.tag_configure("fail", foreground="#ff7070")
         self.append_output(
-            "点击上方按钮执行命令，或点击下方绿条打开 Git 终端直接输入命令，"
+            "点击上方按钮执行命令，或在下方输入 git 命令后回车执行，"
             "图形化视图会自动同步。\n\n")
 
-    def open_terminal(self, _event=None):
-        if self._terminal_opening:
+    def _run_command(self, _event=None):
+        raw = self.cmd_var.get().strip()
+        if not raw:
             return
-        repo = self.path_var.get().strip()
-        if not repo or not os.path.isdir(repo):
-            messagebox.showwarning("提示", "请先在上方选择一个有效的目录。")
+        self._cmd_history.append(raw)
+        self._cmd_hist_idx = len(self._cmd_history)
+        self.cmd_var.set("")
+        args = shlex.split(raw)
+        self.run(args, require_repo=False)
+
+    def _cmd_history_prev(self, _event=None):
+        if not self._cmd_history:
             return
-        self._terminal_opening = True
-        self.root.after(
-            800, lambda: setattr(self, "_terminal_opening", False))
-        try:
-            import ctypes
-            ret = ctypes.windll.shell32.ShellExecuteW(
-                None, "open", "cmd.exe", "/k", repo, 1)
-            if ret <= 32:
-                raise OSError(f"ShellExecuteW 返回错误码 {ret}")
-            self.append_output(
-                f"[已打开 Git 命令行终端，目录: {repo}]\n"
-                "在终端中输入 git 命令，图形化视图会自动同步显示结果。\n\n",
-                "cmd")
-        except Exception as exc:
-            messagebox.showerror("错误", f"无法打开终端: {exc}")
+        if self._cmd_hist_idx > 0:
+            self._cmd_hist_idx -= 1
+            self.cmd_var.set(self._cmd_history[self._cmd_hist_idx])
+
+    def _cmd_history_next(self, _event=None):
+        if not self._cmd_history:
+            return
+        if self._cmd_hist_idx < len(self._cmd_history) - 1:
+            self._cmd_hist_idx += 1
+            self.cmd_var.set(self._cmd_history[self._cmd_hist_idx])
+        else:
+            self._cmd_hist_idx = len(self._cmd_history)
+            self.cmd_var.set("")
 
     def _auto_refresh(self):
         try:
@@ -241,6 +247,7 @@ class GitGUI:
         return data
 
     def _apply_refresh(self, data):
+        focus = self.root.focus_get()
         self.branch_label.configure(
             text=f"当前分支: {data['branch']}    变更文件: {len(data['files'])} 个")
         self.file_list.delete(0, "end")
@@ -251,6 +258,8 @@ class GitGUI:
         self._graph_rows = data["rows"]
         self._selected = None
         self._draw_graph()
+        if focus:
+            focus.focus_set()
 
     def append_output(self, msg, tag=None):
         self.output.configure(state="normal")
@@ -521,6 +530,7 @@ class GitGUI:
         self._result_q.put((display, text, code, args, on_success, repo))
 
     def _poll_queue(self):
+        focus = self.root.focus_get()
         try:
             while True:
                 (display, text, code, args, on_success,
@@ -545,6 +555,8 @@ class GitGUI:
                 self._apply_refresh(self._refresh_q.get_nowait())
         except queue.Empty:
             pass
+        if focus:
+            focus.focus_set()
         self.root.after(100, self._poll_queue)
 
     def run_status(self):
