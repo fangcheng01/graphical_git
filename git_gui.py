@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,10 +35,11 @@ class GitGUI:
     def __init__(self, root):
         self.root = root
         root.title("图形化 Git")
-        root.geometry("940x720")
-        root.minsize(780, 560)
+        root.geometry("960x920")
+        root.minsize(800, 700)
         self._build_top()
         self._build_buttons()
+        self._build_graph()
         self._build_files()
         self._build_output()
         self.refresh_status()
@@ -99,7 +100,7 @@ class GitGUI:
         self.branch_label.pack(anchor="w", padx=6, pady=(4, 0))
         frame = ttk.Frame(box)
         frame.pack(fill="x", padx=6, pady=(2, 6))
-        self.file_list = tk.Listbox(frame, height=7, font=("Consolas", 10))
+        self.file_list = tk.Listbox(frame, height=5, font=("Consolas", 10))
         scroll = ttk.Scrollbar(frame, command=self.file_list.yview)
         self.file_list.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -110,7 +111,7 @@ class GitGUI:
         box = ttk.LabelFrame(self.root, text="Git 命令行输出（原版）")
         box.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         self.output = tk.Text(
-            box, height=10, state="disabled", wrap="none", relief="flat",
+            box, height=8, state="disabled", wrap="none", relief="flat",
             bg="#1e1e1e", fg="#dcdcdc", font=("Consolas", 10))
         scroll = ttk.Scrollbar(box, command=self.output.yview)
         self.output.configure(yscrollcommand=scroll.set)
@@ -165,6 +166,209 @@ class GitGUI:
         self.file_list.delete(0, "end")
         for f in files:
             self.file_list.insert("end", f)
+        self.refresh_graph()
+
+    def _build_graph(self):
+        self._graph_commits = []
+        self._graph_lanes = {}
+        self._graph_rows = {}
+        self._graph_nodes = []
+        self._selected = None
+        self._graph_font = tkfont.Font(family="Microsoft YaHei UI", size=9)
+        box = ttk.LabelFrame(
+            self.root,
+            text="版本历史图（单击选中提交，右键：详情 / 回滚 / 检出；橙=HEAD 绿=分支）")
+        box.pack(fill="x", padx=8, pady=4)
+        frame = ttk.Frame(box)
+        frame.pack(fill="x", padx=6, pady=6)
+        self.graph = tk.Canvas(frame, height=300, bg="#ffffff",
+                               highlightthickness=0)
+        scroll = ttk.Scrollbar(frame, orient="vertical",
+                               command=self.graph.yview)
+        self.graph.configure(yscrollcommand=scroll.set)
+        self.graph.bind("<Button-1>", self._on_graph_click)
+        self.graph.bind("<Button-3>", self._on_graph_menu)
+        self.graph.bind("<Configure>", lambda e: self._draw_graph())
+        scroll.pack(side="right", fill="y")
+        self.graph.pack(side="left", fill="both", expand=True)
+
+    def refresh_graph(self):
+        self._graph_commits = []
+        self._graph_lanes = {}
+        self._graph_rows = {}
+        self._selected = None
+        repo = self.path_var.get().strip()
+        if repo and os.path.isdir(repo):
+            _, out, code = run_git(repo, [
+                "log", "--all", "--topo-order", "--max-count=200",
+                "--pretty=format:%H%x00%h%x00%s%x00%P%x00%d"])
+            if code == 0 and out.strip():
+                commits = []
+                for line in out.split("\n"):
+                    parts = line.split("\x00")
+                    if len(parts) >= 5:
+                        commits.append({
+                            "hash": parts[0], "short": parts[1],
+                            "subject": parts[2],
+                            "parents": parts[3].split() if parts[3] else [],
+                            "refs": parts[4].strip(" ()"),
+                        })
+                waiting = {}
+                next_lane = 0
+                for c in commits:
+                    q = waiting.get(c["hash"])
+                    if q:
+                        lane = q.pop(0)
+                        if not q:
+                            del waiting[c["hash"]]
+                    else:
+                        lane = next_lane
+                        next_lane += 1
+                    self._graph_lanes[c["hash"]] = lane
+                    for i, p in enumerate(c["parents"]):
+                        if i == 0:
+                            waiting.setdefault(p, []).append(lane)
+                        else:
+                            waiting.setdefault(p, []).append(next_lane)
+                            next_lane += 1
+
+                for i, c in enumerate(commits):
+                    self._graph_rows[c["hash"]] = i
+                self._graph_commits = commits
+        self._draw_graph()
+
+    def _draw_graph(self):
+        canvas = self.graph
+        canvas.delete("all")
+        self._graph_nodes = []
+        commits = self._graph_commits
+        if not commits:
+            canvas.create_text(16, 16, anchor="w", fill="#999999",
+                               text="暂无提交（空仓库或尚未初始化）")
+            canvas.configure(scrollregion=(0, 0, 100, 40))
+            return
+        col_w, row_h, r = 30, 34, 7
+        mx, my = 24, 24
+        f = self._graph_font
+        lanes, rows = self._graph_lanes, self._graph_rows
+        for c in commits:
+            for p in c["parents"]:
+                if p not in rows:
+                    continue
+                x1 = mx + lanes[c["hash"]] * col_w
+                y1 = my + rows[c["hash"]] * row_h
+                x2 = mx + lanes[p] * col_w
+                y2 = my + rows[p] * row_h
+                canvas.create_line(
+                    x1, y1, x1, y1 + row_h / 2, x2, y2 - row_h / 2, x2, y2,
+                    smooth=True, fill="#b8c0cc", width=2)
+        sel = self._selected["hash"] if self._selected else None
+        max_x = 0
+        for c in commits:
+            h = c["hash"]
+            x = mx + lanes[h] * col_w
+            y = my + rows[h] * row_h
+            color = "#ff9500" if c["refs"].startswith("HEAD") else "#4a90d9"
+            if h == sel:
+                canvas.create_oval(x - 11, y - 11, x + 11, y + 11,
+                                   outline="#e65000", width=2)
+            canvas.create_oval(x - r, y - r, x + r, y + r,
+                               fill=color, outline="#ffffff", width=1)
+            tx = x + r + 10
+            canvas.create_text(tx, y, anchor="w", fill="#909090",
+                               text=c["short"], font=f)
+            tx += f.measure(c["short"]) + 10
+            canvas.create_text(tx, y, anchor="w", fill="#222222",
+                               text=c["subject"], font=f)
+            tx += f.measure(c["subject"]) + 14
+            for ref in c["refs"].split(", "):
+                ref = ref.strip()
+                if not ref:
+                    continue
+                if ref.startswith("HEAD"):
+                    label, color2 = ref, "#e65000"
+                elif ref.startswith("tag:"):
+                    label, color2 = ref[4:].strip(), "#8e7cc3"
+                elif "/" in ref:
+                    label, color2 = ref, "#8a8a8a"
+                else:
+                    label, color2 = ref, "#2e7d32"
+                w = f.measure(label) + 12
+                canvas.create_rectangle(tx, y - 10, tx + w, y + 10,
+                                        outline=color2, width=1)
+                canvas.create_text(tx + 6, y, anchor="w", fill=color2,
+                                   text=label, font=f)
+                tx += w + 6
+            max_x = max(max_x, tx)
+            self._graph_nodes.append(
+                {"hash": h, "short": c["short"], "x": x, "y": y})
+        total_h = my * 2 + len(commits) * row_h
+        width = max(max_x + 20, canvas.winfo_width())
+        canvas.configure(scrollregion=(0, 0, width, total_h))
+
+    def _hit_node(self, cx, cy):
+        best, best_d = None, 15 * 15
+        for n in self._graph_nodes:
+            d = (n["x"] - cx) ** 2 + (n["y"] - cy) ** 2
+            if d <= best_d:
+                best, best_d = n, d
+        return best
+
+    def _on_graph_click(self, event):
+        node = self._hit_node(self.graph.canvasx(event.x),
+                              self.graph.canvasy(event.y))
+        if node:
+            self._select_commit(node)
+
+    def _on_graph_menu(self, event):
+        node = self._hit_node(self.graph.canvasx(event.x),
+                              self.graph.canvasy(event.y))
+        if not node:
+            return
+        self._selected = node
+        self._draw_graph()
+        s = node["short"]
+        menu = tk.Menu(self.graph, tearoff=0)
+        menu.add_command(label=f"查看此提交详情（{s}）",
+                         command=lambda: self._select_commit(node))
+        menu.add_command(label=f"回滚到此版本，丢弃之后的提交（{s}）",
+                         command=lambda: self._reset_to(node, True))
+        menu.add_command(label=f"回滚到此版本，保留改动在暂存区（{s}）",
+                         command=lambda: self._reset_to(node, False))
+        menu.add_command(label=f"检出此版本，进入游离 HEAD（{s}）",
+                         command=lambda: self._checkout_commit(node))
+        menu.add_separator()
+        menu.add_command(label="复制完整哈希",
+                         command=lambda: self._copy_hash(node))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _select_commit(self, node):
+        self._selected = node
+        self._draw_graph()
+        self.run(["show", "--stat", "--format=medium", node["short"]])
+
+    def _reset_to(self, node, hard):
+        s = node["short"]
+        if hard:
+            confirm = (f"确定硬回滚到 {s} 吗？\n\n"
+                       "此提交之后的所有提交与未提交改动都会被丢弃，"
+                       "操作不易恢复！\n\n命令: git reset --hard " + s)
+            self.run(["reset", "--hard", s], confirm=confirm)
+        else:
+            confirm = (f"回滚到 {s}，改动保留在暂存区？\n\n"
+                       "命令: git reset --soft " + s)
+            self.run(["reset", "--soft", s], confirm=confirm)
+
+    def _checkout_commit(self, node):
+        s = node["short"]
+        confirm = (f"检出 {s}？HEAD 将进入游离状态（不属于任何分支）。\n\n"
+                   "命令: git switch --detach " + s)
+        self.run(["switch", "--detach", s], confirm=confirm)
+
+    def _copy_hash(self, node):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(node["hash"])
+        self.state_var.set(f"已复制完整哈希: {node['hash']}")
 
     def run(self, args, slow=False, confirm=None, repo=None,
             require_repo=True, on_success=None):
