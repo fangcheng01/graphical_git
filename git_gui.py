@@ -455,8 +455,25 @@ class GitGUI:
     def _on_graph_click(self, event):
         node = self._hit_node(self.graph.canvasx(event.x),
                               self.graph.canvasy(event.y))
-        if node:
-            self._select_commit(node)
+        if not node:
+            return
+        self._selected = node
+        self._draw_graph()
+        s = node["short"]
+        menu = tk.Menu(self.graph, tearoff=0)
+        menu.add_command(label=f"查看此提交详情（{s}）",
+                         command=lambda: self._select_commit(node))
+        menu.add_separator()
+        menu.add_command(label=f"⤺ 回滚到此版本，丢弃之后的提交（{s}）",
+                         command=lambda: self._reset_to(node, True))
+        menu.add_command(label=f"⤺ 回滚到此版本，保留改动在暂存区（{s}）",
+                         command=lambda: self._reset_to(node, False))
+        menu.add_command(label=f"检出此版本，进入游离 HEAD（{s}）",
+                         command=lambda: self._checkout_commit(node))
+        menu.add_separator()
+        menu.add_command(label="复制完整哈希",
+                         command=lambda: self._copy_hash(node))
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _on_graph_menu(self, event):
         node = self._hit_node(self.graph.canvasx(event.x),
