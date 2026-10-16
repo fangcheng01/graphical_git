@@ -73,7 +73,8 @@ class GitGUI:
              ("查看分支", lambda: self.run(["branch", "-a"])),
              ("新建并切换分支", self.create_branch),
              ("切换分支", self.switch_branch),
-             ("合并分支", self.merge_branch)],
+             ("合并分支", self.merge_branch),
+             ("中止合并", self.abort_merge)],
             [("拉取", lambda: self.run(["pull"], slow=True)),
              ("推送", lambda: self.run(["push"], slow=True)),
              ("查看远程", lambda: self.run(["remote", "-v"])),
@@ -405,6 +406,8 @@ class GitGUI:
                     "ok" if ok else "fail")
                 self.state_var.set("就绪")
                 self.refresh_status()
+                if args and args[0] == "merge" and not ok:
+                    self._check_merge_conflict(repo)
                 if on_success and ok:
                     on_success()
             except tk.TclError:
@@ -492,14 +495,110 @@ class GitGUI:
         if not repo or not os.path.isdir(repo) or not self.is_repo(repo):
             messagebox.showwarning("提示", "请先选择一个有效的 Git 仓库。")
             return
+        if self._merge_in_progress(repo):
+            messagebox.showwarning(
+                "提示", "当前已有未完成的合并。\n请解决冲突后提交，或点击「中止合并」。")
+            return
         cur = self.current_branch(repo)
         choices = [b for b in self._local_branches(repo) if b != cur]
         if not choices:
             messagebox.showinfo("合并分支", "没有其他分支可合并。")
             return
-        name = self._choose(f"把哪个分支合并到 {cur or '当前分支'}", choices)
-        if name:
-            self.run(["merge", name])
+        _, out, code = run_git(repo, ["status", "--porcelain"])
+        if code == 0 and out.strip():
+            if not messagebox.askyesno(
+                    "提示",
+                    "工作区有未提交的改动，合并可能失败或产生混乱。\n"
+                    "建议先「提交」或「暂存改动(stash)」。\n仍要继续合并吗？"):
+                return
+        picked = self._merge_dialog(cur, choices)
+        if not picked:
+            return
+        branch, mode = picked
+        args = ["merge"]
+        if mode == "no-ff":
+            args.append("--no-ff")
+        elif mode == "squash":
+            args.append("--squash")
+        args.append(branch)
+        self.run(args, slow=True)
+
+    def _merge_dialog(self, cur, choices):
+        win = tk.Toplevel(self.root)
+        win.title("合并分支")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        ttk.Label(win, text=f"把哪个分支合并到「{cur or '当前分支'}」:").pack(
+            padx=12, pady=(12, 4))
+        var = tk.StringVar(value=choices[0])
+        ttk.Combobox(win, textvariable=var, values=choices,
+                     state="readonly", width=34).pack(padx=12, pady=2)
+        mode_var = tk.StringVar(value="normal")
+        box = ttk.Frame(win)
+        box.pack(padx=12, pady=(6, 2))
+        for text, val in [("普通合并（能快进则快进）", "normal"),
+                          ("强制生成合并提交（--no-ff）", "no-ff"),
+                          ("压缩为一次提交（--squash）", "squash")]:
+            ttk.Radiobutton(box, text=text, value=val,
+                            variable=mode_var).pack(anchor="w")
+        ttk.Label(win, text="遇到冲突时：修改冲突文件 → 暂存全部 → 提交；\n或点击「中止合并」放弃本次合并。",
+                  foreground="#666666", justify="left").pack(
+            padx=12, pady=(4, 0))
+        result = []
+
+        def ok(_event=None):
+            result.append((var.get(), mode_var.get()))
+            win.destroy()
+
+        def cancel():
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.pack(pady=(6, 12))
+        ttk.Button(btns, text="开始合并", command=ok).pack(
+            side="left", padx=6)
+        ttk.Button(btns, text="取消", command=cancel).pack(side="left")
+        win.bind("<Return>", ok)
+        win.wait_window()
+        return result[0] if result else None
+
+    def _merge_in_progress(self, repo):
+        _, _, code = run_git(repo, ["rev-parse", "-q", "--verify",
+                                    "MERGE_HEAD"])
+        return code == 0
+
+    def _check_merge_conflict(self, repo):
+        _, out, code = run_git(repo, ["status", "--porcelain"])
+        conflicts = []
+        if code == 0:
+            conflicts = [line[3:] for line in out.splitlines()
+                         if line[:2] in ("UU", "AA", "DD",
+                                         "AU", "UA", "DU", "UD")]
+        if conflicts:
+            self.state_var.set(
+                f"⚠ 合并冲突: {len(conflicts)} 个文件待解决")
+            self.append_output(
+                "⚠ 检测到合并冲突！冲突文件:\n  "
+                + "\n  ".join(conflicts)
+                + "\n解决后: 「暂存全部」→「提交」完成合并；"
+                  "或点击「中止合并」放弃。\n\n", "fail")
+        elif self._merge_in_progress(repo):
+            self.state_var.set("合并进行中(无冲突)，请提交完成合并")
+        else:
+            self.state_var.set("就绪")
+
+    def abort_merge(self):
+        repo = self.path_var.get().strip()
+        if not repo or not os.path.isdir(repo) or not self.is_repo(repo):
+            messagebox.showwarning("提示", "请先选择一个有效的 Git 仓库。")
+            return
+        if not self._merge_in_progress(repo):
+            messagebox.showinfo("中止合并", "当前没有进行中的合并。")
+            return
+        self.run(
+            ["merge", "--abort"],
+            confirm="确定中止当前合并？工作区将恢复到合并前状态。\n命令: git merge --abort")
 
     def clone(self):
         url = simpledialog.askstring("克隆仓库", "请输入仓库地址:", parent=self.root)
