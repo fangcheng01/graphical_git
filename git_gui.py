@@ -735,13 +735,157 @@ class RepoPanel:
                 f"⚠ 合并冲突: {len(conflicts)} 个文件待解决")
             self.append_output(
                 "⚠ 检测到合并冲突！冲突文件:\n  "
-                + "\n  ".join(conflicts)
-                + "\n解决后: 「暂存全部」→「提交」完成合并；"
-                  "或点击「中止合并」放弃。\n\n", "fail")
+                + "\n  ".join(conflicts) + "\n", "fail")
+            if messagebox.askyesno(
+                    "合并冲突",
+                    f"检测到 {len(conflicts)} 个文件的合并冲突。\n"
+                    "是否尝试自动修改？"):
+                file_results = self._auto_resolve_conflicts(repo, conflicts)
+                if file_results:
+                    self._show_conflict_diff(repo, file_results)
+                else:
+                    self.append_output("没有可自动修改的冲突文件。\n\n", "fail")
+            else:
+                self.append_output(
+                    "请手动解决: 修改冲突文件 → 「暂存全部」→「提交」完成合并；"
+                    "或点击「中止合并」放弃。\n\n", "fail")
         elif self._merge_in_progress(repo):
             self.state_var.set("合并进行中(无冲突)，请提交完成合并")
         else:
             self.state_var.set("就绪")
+
+    def _auto_resolve_conflicts(self, repo, conflicts):
+        def resolve(text):
+            lines = text.splitlines(keepends=True)
+            result = []
+            i = 0
+            n = len(lines)
+            while i < n:
+                if lines[i].startswith("<<<<<<<"):
+                    marker = lines[i]
+                    i += 1
+                    head = []
+                    while i < n and not lines[i].startswith("======="):
+                        head.append(lines[i])
+                        i += 1
+                    if i >= n:
+                        result.append(marker)
+                        result.extend(head)
+                        break
+                    i += 1
+                    branch = []
+                    while i < n and not lines[i].startswith(">>>>>>>"):
+                        branch.append(lines[i])
+                        i += 1
+                    if i >= n:
+                        result.append(marker)
+                        result.extend(head)
+                        result.append("=======\n")
+                        result.extend(branch)
+                        break
+                    i += 1
+                    head_text = "".join(head)
+                    branch_text = "".join(branch)
+                    if not head_text.strip() and not branch_text.strip():
+                        pass
+                    elif not head_text.strip():
+                        result.extend(branch)
+                    elif not branch_text.strip():
+                        result.extend(head)
+                    else:
+                        merged = list(head)
+                        for b in branch:
+                            if b not in merged:
+                                merged.append(b)
+                        result.extend(merged)
+                else:
+                    result.append(lines[i])
+                    i += 1
+            return "".join(result)
+
+        file_results = []
+        for rel in conflicts:
+            path = os.path.join(repo, rel)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                original = f.read()
+            resolved = resolve(original)
+            with open(path, "w", encoding="utf-8", errors="replace") as f:
+                f.write(resolved)
+            file_results.append((rel, original, resolved))
+            self.append_output(f"── 冲突文件: {rel} ──\n", "fail")
+            self.append_output("【原始内容】\n")
+            self.append_output(original + "\n")
+            self.append_output("【修改后内容】\n", "ok")
+            self.append_output(resolved + "\n\n")
+        return file_results
+
+    def _show_conflict_diff(self, repo, file_results):
+        win = tk.Toplevel(self.root)
+        win.title("冲突修改对比 - 请检查")
+        win.transient(self.root)
+        win.grab_set()
+        win.geometry("960x640")
+        names = [r[0] for r in file_results]
+        sel = tk.StringVar(value=names[0])
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Label(bar, text="文件:").pack(side="left", padx=(0, 4))
+        box = ttk.Combobox(bar, textvariable=sel, values=names,
+                           state="readonly", width=54)
+        box.pack(side="left")
+        content = ttk.Frame(win)
+        content.pack(fill="both", expand=True, padx=8, pady=4)
+        left_frame = ttk.Frame(content)
+        right_frame = ttk.Frame(content)
+        left_frame.pack(side="left", fill="both", expand=True)
+        right_frame.pack(side="left", fill="both", expand=True)
+        ttk.Label(left_frame, text="冲突原始内容").pack(anchor="w")
+        ttk.Label(right_frame, text="修改后内容").pack(anchor="w")
+        lsb = ttk.Scrollbar(left_frame)
+        rsb = ttk.Scrollbar(right_frame)
+        left = tk.Text(left_frame, wrap="none", yscrollcommand=lsb.set)
+        right = tk.Text(right_frame, wrap="none", yscrollcommand=rsb.set)
+        lsb.config(command=left.yview)
+        rsb.config(command=right.yview)
+        lsb.pack(side="right", fill="y")
+        left.pack(side="left", fill="both", expand=True)
+        rsb.pack(side="right", fill="y")
+        right.pack(side="left", fill="both", expand=True)
+        data = {r[0]: (r[1], r[2]) for r in file_results}
+
+        def show(_event=None):
+            name = sel.get()
+            orig, new = data.get(name, ("", ""))
+            left.delete("1.0", "end")
+            right.delete("1.0", "end")
+            left.insert("1.0", orig)
+            right.insert("1.0", new)
+
+        box.bind("<<ComboboxSelected>>", show)
+        show()
+        btns = ttk.Frame(win)
+        btns.pack(pady=(4, 12))
+        result = []
+
+        def accept():
+            result.append("accept")
+            win.destroy()
+
+        def discard():
+            result.append("discard")
+            win.destroy()
+
+        ttk.Button(btns, text="接受修改", command=accept).pack(side="left", padx=6)
+        ttk.Button(btns, text="放弃修改", command=discard).pack(side="left", padx=6)
+        win.wait_window()
+        if result and result[0] == "accept":
+            self.run(["add"] + names, repo=repo)
+            self.append_output("已暂存所有自动解决冲突的文件，请点击「提交」完成合并。\n\n", "ok")
+        elif result and result[0] == "discard":
+            self.run(["merge", "--abort"], repo=repo)
+            self.append_output("已放弃本次合并，工作区恢复到合并前状态。\n\n", "fail")
 
     def abort_merge(self):
         repo = self.path_var.get().strip()
