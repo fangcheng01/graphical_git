@@ -13,6 +13,8 @@ import time
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
+from conflict_agent import ConflictAgent
+
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(os.path.expanduser("~"), ".git_gui_state.json")
 
@@ -46,6 +48,7 @@ class RepoPanel:
         self._refresh_q = queue.Queue()
         self._cmd_history = list(cmd_history) if cmd_history else []
         self._cmd_hist_idx = len(self._cmd_history)
+        self._conflict_agent = ConflictAgent()
         self._build(parent)
         self.refresh_status()
 
@@ -835,298 +838,6 @@ class RepoPanel:
             self.state_var.set("就绪")
 
     def _auto_resolve_conflicts(self, repo, conflicts):
-        def resolve(text):
-            lines = text.splitlines(keepends=True)
-            result = []
-            i = 0
-            n = len(lines)
-
-            def is_import_line(line):
-                s = line.strip()
-                if not s:
-                    return False
-                return s.startswith(("import ", "from ", "#include"))
-
-            def compress_blanks(lst):
-                out = []
-                prev_blank = False
-                for ln in lst:
-                    cur_blank = not ln.strip()
-                    if cur_blank and prev_blank:
-                        continue
-                    out.append(ln)
-                    prev_blank = cur_blank
-                return out
-
-            def fix_newlines(lst):
-                out = []
-                for ln in lst:
-                    if ln and not ln.endswith("\n"):
-                        out.append(ln + "\n")
-                    else:
-                        out.append(ln)
-                return out
-
-            def detect_indent(lines):
-                counts = {"    ": 0, "  ": 0, "\t": 0}
-                for ln in lines:
-                    if ln.startswith("    "):
-                        counts["    "] += 1
-                    elif ln.startswith("  "):
-                        counts["  "] += 1
-                    elif ln.startswith("\t"):
-                        counts["\t"] += 1
-                best = max(counts, key=counts.get)
-                if counts[best] == 0:
-                    return None
-                return best
-
-            def convert_indent(line, target):
-                stripped = line.lstrip()
-                if not stripped:
-                    return line
-                leading = line[:len(line) - len(stripped)]
-                if "\t" in leading and target != "\t":
-                    return leading.replace("\t", target) + stripped
-                if " " in leading and target == "\t":
-                    return leading.replace("    ", "\t").replace("  ", "\t") + stripped
-                return line
-
-            def brackets_balanced(lines):
-                text = "".join(lines)
-                pairs = {"(": ")", "[": "]", "{": "}"}
-                stack = []
-                in_str = None
-                i = 0
-                while i < len(text):
-                    c = text[i]
-                    if in_str:
-                        if c == "\\":
-                            i += 2
-                            continue
-                        if c == in_str:
-                            in_str = None
-                        i += 1
-                        continue
-                    if c in ('"', "'"):
-                        in_str = c
-                    elif c in pairs:
-                        stack.append(c)
-                    elif c in pairs.values():
-                        if not stack:
-                            return False
-                        top = stack.pop()
-                        if pairs[top] != c:
-                            return False
-                    i += 1
-                return len(stack) == 0
-
-            def merge_general(head, branch):
-                head_set = set(head)
-                branch_set = set(branch)
-                overlap = len(head_set & branch_set) / max(len(head_set | branch_set), 1)
-                if overlap < 0.2:
-                    return None
-                target_indent = detect_indent(head)
-                merged = list(head)
-                for b in branch:
-                    if b not in merged:
-                        if target_indent:
-                            merged.append(convert_indent(b, target_indent))
-                        else:
-                            merged.append(b)
-                merged = compress_blanks(merged)
-                merged = fix_newlines(merged)
-                if not brackets_balanced(merged):
-                    return None
-                return merged
-
-            def is_json_like(text):
-                s = text.strip()
-                return bool(s) and s[0] in "{["
-
-            def deep_merge_dict(a, b):
-                result = dict(a)
-                for k, v in b.items():
-                    if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-                        result[k] = deep_merge_dict(result[k], v)
-                    else:
-                        result[k] = v
-                return result
-
-            def merge_json(head_text, branch_text):
-                import json
-                try:
-                    head_obj = json.loads(head_text)
-                    branch_obj = json.loads(branch_text)
-                except Exception:
-                    return None
-                if not isinstance(head_obj, dict) or not isinstance(branch_obj, dict):
-                    return None
-                merged = deep_merge_dict(head_obj, branch_obj)
-                try:
-                    out = json.dumps(merged, indent=2, ensure_ascii=False)
-                except Exception:
-                    return None
-                return [ln + "\n" for ln in out.splitlines()]
-
-            def is_yaml_like(text):
-                for ln in text.splitlines():
-                    if ln.startswith((" ", "\t", "#")):
-                        continue
-                    s = ln.strip()
-                    if not s:
-                        continue
-                    if ":" in ln:
-                        return True
-                return False
-
-            def is_ini_like(text):
-                for ln in text.splitlines():
-                    s = ln.strip()
-                    if s.startswith("[") and s.endswith("]"):
-                        return True
-                    if "=" in s and not s.startswith("#"):
-                        return True
-                return False
-
-            def merge_kv_block(head, branch, sep):
-                def top_keys(lines):
-                    keys = set()
-                    for ln in lines:
-                        if ln.startswith((" ", "\t", "#")):
-                            continue
-                        s = ln.strip()
-                        if not s:
-                            continue
-                        if sep in ln:
-                            keys.add(ln.split(sep, 1)[0].strip())
-                        elif s.startswith("[") and s.endswith("]"):
-                            keys.add(s)
-                    return keys
-                head_keys = top_keys(head)
-                branch_keys = top_keys(branch)
-                if not head_keys and not branch_keys:
-                    return None
-                merged = list(head)
-                for ln in branch:
-                    if ln.startswith((" ", "\t", "#")):
-                        continue
-                    s = ln.strip()
-                    if not s:
-                        continue
-                    if sep in ln:
-                        k = ln.split(sep, 1)[0].strip()
-                        if k not in head_keys:
-                            merged.append(ln)
-                    elif s.startswith("[") and s.endswith("]"):
-                        if s not in head_keys:
-                            merged.append(ln)
-                merged = compress_blanks(merged)
-                merged = fix_newlines(merged)
-                if not brackets_balanced(merged):
-                    return None
-                return merged
-
-            def try_config_merge(head, branch):
-                head_text = "".join(head)
-                branch_text = "".join(branch)
-                if is_json_like(head_text) and is_json_like(branch_text):
-                    r = merge_json(head_text, branch_text)
-                    if r is not None:
-                        return r
-                if is_yaml_like(head_text) and is_yaml_like(branch_text):
-                    r = merge_kv_block(head, branch, ":")
-                    if r is not None:
-                        return r
-                if is_ini_like(head_text) and is_ini_like(branch_text):
-                    r = merge_kv_block(head, branch, "=")
-                    if r is not None:
-                        return r
-                return None
-
-            def merge_imports(head, branch):
-                head_imp = [ln for ln in head if is_import_line(ln)]
-                head_non = [ln for ln in head if not is_import_line(ln)]
-                branch_imp = [ln for ln in branch if is_import_line(ln)]
-                branch_non = [ln for ln in branch if not is_import_line(ln)]
-                merged_imp = list(head_imp)
-                for bi in branch_imp:
-                    if bi not in merged_imp:
-                        merged_imp.append(bi)
-                merged_non = do_merge(head_non, branch_non)
-                if merged_non is None:
-                    merged_non = list(head_non) + list(branch_non)
-                result = merged_imp + merged_non
-                if not brackets_balanced(result):
-                    return None
-                return result
-
-            def do_merge(head, branch):
-                if head == branch:
-                    return head
-                head_empty = all(not ln.strip() for ln in head)
-                branch_empty = all(not ln.strip() for ln in branch)
-                if head_empty and branch_empty:
-                    return []
-                if head_empty:
-                    return branch
-                if branch_empty:
-                    return head
-                head_has_imp = any(is_import_line(ln) for ln in head)
-                branch_has_imp = any(is_import_line(ln) for ln in branch)
-                if head_has_imp or branch_has_imp:
-                    return merge_imports(head, branch)
-                config_result = try_config_merge(head, branch)
-                if config_result is not None:
-                    return config_result
-                head_set = set(head)
-                branch_set = set(branch)
-                if head_set <= branch_set:
-                    return branch
-                if branch_set <= head_set:
-                    return head
-                return merge_general(head, branch)
-
-            while i < n:
-                if lines[i].startswith("<<<<<<<"):
-                    marker = lines[i]
-                    i += 1
-                    head = []
-                    while i < n and not lines[i].startswith("======="):
-                        head.append(lines[i])
-                        i += 1
-                    if i >= n:
-                        result.append(marker)
-                        result.extend(head)
-                        break
-                    i += 1
-                    branch = []
-                    while i < n and not lines[i].startswith(">>>>>>>"):
-                        branch.append(lines[i])
-                        i += 1
-                    if i >= n:
-                        result.append(marker)
-                        result.extend(head)
-                        result.append("=======\n")
-                        result.extend(branch)
-                        break
-                    end_marker = lines[i]
-                    i += 1
-                    merged = do_merge(head, branch)
-                    if merged is None:
-                        result.append(marker)
-                        result.extend(fix_newlines(head))
-                        result.append("=======\n")
-                        result.extend(fix_newlines(branch))
-                        result.append(end_marker)
-                    else:
-                        result.extend(merged)
-                else:
-                    result.append(lines[i])
-                    i += 1
-            return "".join(result)
-
         file_results = []
         for rel in conflicts:
             path = os.path.join(repo, rel)
@@ -1138,14 +849,22 @@ class RepoPanel:
             except OSError as e:
                 self.append_output(f"无法读取 {rel}: {e}\n\n", "fail")
                 continue
-            resolved = resolve(original)
+            resolved, file_reports = self._conflict_agent.resolve(original, rel)
 
-            file_results.append((rel, original, resolved))
+            file_results.append((rel, original, resolved, file_reports))
             self.append_output(f"── 冲突文件: {rel} ──\n", "fail")
             self.append_output("【原始内容】\n")
             self.append_output(original + "\n")
             self.append_output("【修改后内容】\n", "ok")
             self.append_output(resolved + "\n\n")
+            if file_reports:
+                self.append_output("【解决报告】\n", "ok")
+                for rpt in file_reports:
+                    self.append_output(
+                        f"  冲突 {rpt['line_range']} ({rpt['type']}): "
+                        f"{rpt['strategy']} - {rpt['reason']} "
+                        f"[置信度: {rpt['confidence']:.2f}]\n")
+                self.append_output("\n")
         return file_results
 
     def _show_conflict_diff(self, repo, file_results):
@@ -1153,7 +872,7 @@ class RepoPanel:
         win.title("冲突修改对比 - 请检查")
         win.transient(self.root)
         win.grab_set()
-        win.geometry("960x640")
+        win.geometry("960x760")
         names = [r[0] for r in file_results]
         display_values = [f"{i}: {n}" for i, n in enumerate(names)]
         sel = tk.StringVar(value=display_values[0] if display_values else "")
@@ -1181,7 +900,16 @@ class RepoPanel:
         left.pack(side="left", fill="both", expand=True)
         rsb.pack(side="right", fill="y")
         right.pack(side="left", fill="both", expand=True)
-        data = [(r[1], r[2]) for r in file_results]
+        data = [(r[1], r[2], r[3] if len(r) > 3 else []) for r in file_results]
+
+        report_frame = ttk.Frame(win)
+        report_frame.pack(fill="both", padx=8, pady=(2, 4))
+        ttk.Label(report_frame, text="── 冲突解决报告 ──").pack(anchor="w")
+        rsb2 = ttk.Scrollbar(report_frame)
+        report_text = tk.Text(report_frame, height=8, wrap="word", yscrollcommand=rsb2.set)
+        rsb2.config(command=report_text.yview)
+        rsb2.pack(side="right", fill="y")
+        report_text.pack(side="left", fill="both", expand=True)
 
         def show(_event=None):
             val = sel.get()
@@ -1191,11 +919,22 @@ class RepoPanel:
                 idx = 0
             if idx < 0 or idx >= len(data):
                 idx = 0
-            orig, new = data[idx]
+            orig, new, reports = data[idx]
             left.delete("1.0", "end")
             right.delete("1.0", "end")
             left.insert("1.0", orig)
             right.insert("1.0", new)
+            report_text.delete("1.0", "end")
+            if not reports:
+                report_text.insert("1.0", "（无解决报告）")
+                return
+            lines = [f"文件: {names[idx]}"]
+            for j, rpt in enumerate(reports, 1):
+                lines.append(
+                    f"  冲突{j} (行{rpt['line_range']}): "
+                    f"{rpt['strategy']} - {rpt['reason']} "
+                    f"[置信度: {rpt['confidence']:.2f}]")
+            report_text.insert("1.0", "\n".join(lines))
 
         box.bind("<<ComboboxSelected>>", show)
         show()
@@ -1216,7 +955,7 @@ class RepoPanel:
         win.protocol("WM_DELETE_WINDOW", discard)
         win.wait_window()
         if result and result[0] == "accept":
-            for rel, _orig, new in file_results:
+            for rel, _orig, new, _rpts in file_results:
                 path = os.path.join(repo, rel)
                 try:
                     with open(path, "w", encoding="utf-8", errors="replace") as f:
