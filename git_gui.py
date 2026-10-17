@@ -131,7 +131,7 @@ class RepoPanel:
 
         def on_enter(event):
             x, y = event.x_root + 14, event.y_root + 10
-            tw = tk.Toplevel(self.root)
+            tw = tk.Toplevel(widget)
             tw.wm_overrideredirect(True)
             tw.wm_geometry(f"+{x}+{y}")
             tk.Label(
@@ -200,7 +200,11 @@ class RepoPanel:
         self._cmd_history.append(raw)
         self._cmd_hist_idx = len(self._cmd_history)
         self.cmd_var.set("")
-        args = shlex.split(raw)
+        try:
+            args = shlex.split(raw)
+        except ValueError as e:
+            messagebox.showwarning("命令解析失败", str(e))
+            return
         self.run(args, require_repo=False)
 
     def _cmd_history_prev(self, _event=None):
@@ -250,7 +254,11 @@ class RepoPanel:
         if code == 0:
             _, bout, bcode = run_git(repo, ["branch", "--show-current"])
             b = bout.strip() if bcode == 0 else ""
-            data["branch"] = b if b else "（空仓库，还没有提交）"
+            if b:
+                data["branch"] = b
+            else:
+                _, _, lc = run_git(repo, ["rev-parse", "--short", "HEAD"])
+                data["branch"] = "(detached HEAD)" if lc == 0 else "（空仓库，还没有提交）"
             data["files"] = [f"{e[:2]}  {e[3:]}"
                              for e in out.split("\x00") if len(e) > 3]
         _, lout, lcode = run_git(repo, [
@@ -301,10 +309,14 @@ class RepoPanel:
         self._graph_commits = data["commits"]
         self._graph_lanes = data["lanes"]
         self._graph_rows = data["rows"]
-        self._selected = None
+        if self._selected and self._selected["hash"] not in data["rows"]:
+            self._selected = None
         self._draw_graph()
         if focus:
-            focus.focus_set()
+            try:
+                focus.focus_set()
+            except tk.TclError:
+                pass
 
     def append_output(self, msg, tag=None):
         self.output.configure(state="normal")
@@ -341,7 +353,11 @@ class RepoPanel:
             _, out, code = run_git(repo, ["status", "-z", "--porcelain"])
             if code == 0:
                 b = self.current_branch(repo)
-                branch = b if b else "（空仓库，还没有提交）"
+                if b:
+                    branch = b
+                else:
+                    _, _, lc = run_git(repo, ["rev-parse", "--short", "HEAD"])
+                    branch = "(detached HEAD)" if lc == 0 else "（空仓库，还没有提交）"
                 files = [f"{e[:2]}  {e[3:]}"
                          for e in out.split("\x00") if len(e) > 3]
         self.branch_label.configure(
@@ -606,7 +622,7 @@ class RepoPanel:
                     "ok" if ok else "fail")
                 self.state_var.set("就绪")
                 self._refresh_async()
-                if args and args[0] == "merge" and not ok:
+                if args and args[0] == "merge" and "--abort" not in args and not ok:
                     self._check_merge_conflict(repo)
                 if on_success and ok:
                     on_success()
@@ -618,7 +634,10 @@ class RepoPanel:
         except queue.Empty:
             pass
         if focus:
-            focus.focus_set()
+            try:
+                focus.focus_set()
+            except tk.TclError:
+                pass
         self.root.after(100, self._poll_queue)
 
     def run_status(self):
@@ -1102,8 +1121,12 @@ class RepoPanel:
             path = os.path.join(repo, rel)
             if not os.path.isfile(path):
                 continue
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                original = f.read()
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    original = f.read()
+            except OSError as e:
+                self.append_output(f"无法读取 {rel}: {e}\n\n", "fail")
+                continue
             resolved = resolve(original)
 
             file_results.append((rel, original, resolved))
@@ -1177,13 +1200,16 @@ class RepoPanel:
         if result and result[0] == "accept":
             for rel, _orig, new in file_results:
                 path = os.path.join(repo, rel)
-                with open(path, "w", encoding="utf-8", errors="replace") as f:
-                    f.write(new)
+                try:
+                    with open(path, "w", encoding="utf-8", errors="replace") as f:
+                        f.write(new)
+                except OSError as e:
+                    self.append_output(f"无法写入 {rel}: {e}\n", "fail")
+                    continue
             self.run(["add"] + names, repo=repo)
             self.append_output("已暂存所有自动解决冲突的文件，请点击「提交」完成合并。\n\n", "ok")
         elif result and result[0] == "discard":
-            self.run(["merge", "--abort"], repo=repo)
-            self.append_output("已放弃本次合并，工作区恢复到合并前状态。\n\n", "fail")
+            self.append_output("已保留原始冲突标记，请手动解决后「暂存全部」→「提交」。\n\n", "fail")
 
     def abort_merge(self):
         repo = self.path_var.get().strip()
@@ -1223,8 +1249,8 @@ class RepoPanel:
 
     def discard_changes(self):
         self.run(
-            ["restore", "."],
-            confirm="确定丢弃全部未提交改动吗？此操作不可恢复！\n命令: git restore .")
+            ["reset", "--hard", "HEAD"],
+            confirm="确定丢弃全部未提交改动（含暂存区）吗？此操作不可恢复！\n命令: git reset --hard HEAD")
 
     def _choose(self, title, items):
         win = tk.Toplevel(self.root)
@@ -1285,7 +1311,11 @@ class GitGUI:
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data.get("tabs", []), data.get("active_tab", 0)
+            tabs = data.get("tabs", [])
+            if not isinstance(tabs, list):
+                return [], 0
+            tabs = [t for t in tabs if isinstance(t, dict) and t.get("path")]
+            return tabs, data.get("active_tab", 0)
         except Exception:
             return [], 0
 
