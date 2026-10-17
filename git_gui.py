@@ -3,6 +3,7 @@
 运行方式: python git_gui.py
 """
 
+import json
 import os
 import queue
 import shlex
@@ -13,6 +14,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(os.path.expanduser("~"), ".git_gui_state.json")
 
 
 def run_git(repo, args, timeout=60):
@@ -33,13 +35,13 @@ def run_git(repo, args, timeout=60):
 
 
 class RepoPanel:
-    def __init__(self, parent, root, repo_path):
+    def __init__(self, parent, root, repo_path, cmd_history=None):
         self.root = root
         self.path_var = tk.StringVar(value=repo_path)
         self._result_q = queue.Queue()
         self._refresh_q = queue.Queue()
-        self._cmd_history = []
-        self._cmd_hist_idx = 0
+        self._cmd_history = list(cmd_history) if cmd_history else []
+        self._cmd_hist_idx = len(self._cmd_history)
         self._build(parent)
         self.refresh_status()
         self.cmd_entry.focus_set()
@@ -1269,19 +1271,58 @@ class GitGUI:
         self.nb = ttk.Notebook(root)
         self.nb.pack(fill="both", expand=True, padx=8, pady=4)
         self._panels = {}
-        self._new_tab(DEFAULT_DIR)
+        tabs, active = self._load_state()
+        if not tabs:
+            tabs = [{"path": DEFAULT_DIR, "cmd_history": []}]
+            active = 0
+        for t in tabs:
+            self._new_tab(t["path"], t.get("cmd_history", []))
+        if active < len(tabs):
+            self.nb.select(active)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _new_tab(self, path=None):
+    def _load_state(self):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("tabs", []), data.get("active_tab", 0)
+        except Exception:
+            return [], 0
+
+    def _save_state(self):
+        tabs = []
+        for frame_id, panel in self._panels.items():
+            tabs.append({
+                "path": panel.path_var.get().strip(),
+                "cmd_history": panel._cmd_history[-50:],
+            })
+        try:
+            active = self.nb.index(self.nb.select())
+        except Exception:
+            active = 0
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"tabs": tabs, "active_tab": active}, f,
+                          ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _on_close(self):
+        self._save_state()
+        self.root.destroy()
+
+    def _new_tab(self, path=None, cmd_history=None):
         if path is None:
             path = filedialog.askdirectory(initialdir=DEFAULT_DIR)
             if not path:
                 return
         frame = ttk.Frame(self.nb)
-        panel = RepoPanel(frame, self.root, path)
+        panel = RepoPanel(frame, self.root, path, cmd_history)
         name = os.path.basename(path) or path
         self.nb.add(frame, text=name)
         self.nb.select(frame)
         self._panels[str(frame)] = panel
+        self._save_state()
 
     def _close_tab(self):
         current = self.nb.select()
@@ -1292,6 +1333,7 @@ class GitGUI:
             return
         self.nb.forget(current)
         self._panels.pop(str(current), None)
+        self._save_state()
 
 
 def main():
