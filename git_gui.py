@@ -8,6 +8,7 @@ import os
 import queue
 import shlex
 import subprocess
+import webbrowser
 import zipfile
 import threading
 import time
@@ -125,7 +126,10 @@ class RepoPanel:
              ("丢弃改动", self.discard_changes,
               "git restore .", "丢弃所有未提交的改动"),
              ("清空输出", self.clear_output,
-              "", "清空命令行输出区")],
+               "", "清空命令行输出区")],
+            [("连接GitHub并推送", self.connect_github,
+               "git remote add + git push -u",
+               "输入或创建 GitHub 仓库地址，连接后把本地文件推送上去")],
         ]
         for row in rows:
             frame = ttk.Frame(box)
@@ -999,6 +1003,119 @@ class RepoPanel:
 
         self.run(["clone", url.strip()], slow=True, repo=parent,
                  require_repo=False, on_success=on_success)
+
+    def connect_github(self):
+        repo = self.path_var.get().strip()
+        if not repo or not os.path.isdir(repo) or not self.is_repo(repo):
+            messagebox.showwarning("提示", "请先选择一个有效的 Git 仓库。")
+            return
+        _, _, code = run_git(repo, ["rev-parse", "HEAD"])
+        if code != 0:
+            messagebox.showwarning(
+                "提示", "当前仓库还没有任何提交。\n"
+                "请先「暂存全部」并「提交」，再连接 GitHub 推送。")
+            return
+        result = self._github_dialog(repo)
+        if not result:
+            return
+        url, remote_name, branch = result
+        _, out, _ = run_git(repo, ["remote"])
+        existing = [r.strip() for r in out.splitlines() if r.strip()]
+        if remote_name in existing:
+            _, cur_url, _ = run_git(repo, ["remote", "get-url", remote_name])
+            if not messagebox.askyesno(
+                    "远程已存在",
+                    f"远程「{remote_name}」已存在:\n  {cur_url.strip()}\n\n"
+                    f"是否替换为新地址？\n  {url}"):
+                return
+            self.run(
+                ["remote", "set-url", remote_name, url],
+                on_success=lambda: self._push_remote(remote_name, branch))
+        else:
+            self.run(
+                ["remote", "add", remote_name, url],
+                on_success=lambda: self._push_remote(remote_name, branch))
+
+    def _push_remote(self, remote_name, branch):
+        self.append_output(
+            f"正在推送 {branch} 到 {remote_name}，首次推送可能需要输入 GitHub 账号密码或令牌……\n",
+            "cmd")
+        self.run(["push", "-u", remote_name, branch], slow=True)
+
+    def _github_dialog(self, repo):
+        win = tk.Toplevel(self.root)
+        win.title("连接 GitHub 并推送")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        ttk.Label(win, text="将本地仓库推送到 GitHub 远程仓库",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(
+            padx=12, pady=(12, 4))
+        info = ttk.LabelFrame(win, text="还没有 GitHub 仓库？按以下步骤创建")
+        info.pack(fill="x", padx=12, pady=4)
+        ttk.Label(
+            info, justify="left",
+            text="1. 点击下方按钮打开 GitHub 创建页面（需先登录 GitHub）\n"
+                 "2. 填写仓库名称，不要勾选「添加 README / .gitignore / 许可证」\n"
+                 "3. 点击「Create repository」创建空仓库\n"
+                 "4. 复制页面给出的 HTTPS 地址，填入下方「仓库 URL」").pack(
+            padx=8, pady=4, anchor="w")
+        ttk.Button(
+            info, text="打开 GitHub 新建仓库页面",
+            command=lambda: webbrowser.open("https://github.com/new")).pack(
+            padx=8, pady=(0, 6))
+        url_frame = ttk.Frame(win)
+        url_frame.pack(fill="x", padx=12, pady=4)
+        ttk.Label(url_frame, text="仓库 URL:").pack(side="left", padx=(0, 4))
+        url_var = tk.StringVar()
+        ttk.Entry(url_frame, textvariable=url_var, width=52).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(
+            url_frame, text="粘贴", width=4,
+            command=lambda: url_var.set(
+                self.root.clipboard_get() or "")).pack(side="left", padx=4)
+        opt_frame = ttk.Frame(win)
+        opt_frame.pack(fill="x", padx=12, pady=4)
+        ttk.Label(opt_frame, text="远程名称:").pack(side="left", padx=(0, 4))
+        remote_var = tk.StringVar(value="origin")
+        ttk.Entry(opt_frame, textvariable=remote_var, width=10).pack(side="left")
+        ttk.Label(opt_frame, text="    推送分支:").pack(side="left", padx=(8, 4))
+        cur = self.current_branch(repo)
+        branch_var = tk.StringVar(value=cur or "main")
+        branches = self._local_branches(repo)
+        ttk.Combobox(opt_frame, textvariable=branch_var, values=branches,
+                     width=18).pack(side="left")
+        _, out, _ = run_git(repo, ["remote", "-v"])
+        if out.strip():
+            ttk.Label(
+                win, text=f"当前已有远程:\n{out}", foreground="#666666",
+                justify="left").pack(padx=12, pady=4, anchor="w")
+        result = []
+
+        def ok():
+            url = url_var.get().strip()
+            if not url:
+                messagebox.showwarning("提示", "请输入仓库 URL。", parent=win)
+                return
+            if not url.startswith(("http://", "https://", "git@")):
+                messagebox.showwarning(
+                    "提示", "URL 格式不正确。\n应为 https://github.com/用户名/仓库名.git",
+                    parent=win)
+                return
+            result.append((url, remote_var.get().strip() or "origin",
+                           branch_var.get().strip() or "main"))
+            win.destroy()
+
+        def cancel():
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.pack(pady=(8, 12))
+        ttk.Button(btns, text="连接并推送", command=ok).pack(
+            side="left", padx=6)
+        ttk.Button(btns, text="取消", command=cancel).pack(side="left")
+        win.wait_window()
+        return result[0] if result else None
 
     def reset_soft(self):
         self.run(
