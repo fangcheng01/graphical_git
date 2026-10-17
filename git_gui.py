@@ -1369,46 +1369,42 @@ class GitGUI:
         self._save_state()
 
     def _export_zip(self):
+        current = self.nb.select()
+        panel = self._panels.get(str(current)) if current else None
+        if not panel:
+            messagebox.showwarning("提示", "请先打开一个仓库标签页。")
+            return
+        repo = panel.path_var.get().strip()
+        if not repo or not os.path.isdir(repo):
+            messagebox.showwarning("提示", "当前标签页没有有效的仓库目录。")
+            return
+        repo_name = os.path.basename(repo) or "repository"
         save_path = filedialog.asksaveasfilename(
-            title="导出项目压缩包",
+            title="导出当前仓库压缩包",
             defaultextension=".zip",
-            initialfile="git_gui_project.zip",
+            initialfile=f"{repo_name}.zip",
             filetypes=[("ZIP 压缩包", "*.zip")])
         if not save_path:
             return
-        include_files = ["git_gui.py", "conflict_agent.py", ".gitignore"]
         exclude_exts = {".pyc", ".log"}
         exclude_dirs = {"__pycache__", ".git"}
+        count = 0
         try:
             with zipfile.ZipFile(save_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for fname in include_files:
-                    fpath = os.path.join(DEFAULT_DIR, fname)
-                    if os.path.isfile(fpath):
-                        zf.write(fpath, fname)
-                for item in os.listdir(DEFAULT_DIR):
-                    if item in include_files or item in exclude_dirs:
-                        continue
-                    fpath = os.path.join(DEFAULT_DIR, item)
-                    if os.path.isfile(fpath):
-                        ext = os.path.splitext(item)[1].lower()
+                for root_dir, dirs, files in os.walk(repo):
+                    dirs[:] = [d for d in dirs if d not in exclude_dirs]
+                    for fn in files:
+                        ext = os.path.splitext(fn)[1].lower()
                         if ext in exclude_exts:
                             continue
-                        zf.write(fpath, item)
-                    elif os.path.isdir(fpath) and item not in exclude_dirs:
-                        for root_dir, dirs, files in os.walk(fpath):
-                            dirs[:] = [d for d in dirs
-                                       if d not in exclude_dirs]
-                            for fn in files:
-                                ext = os.path.splitext(fn)[1].lower()
-                                if ext in exclude_exts:
-                                    continue
-                                full = os.path.join(root_dir, fn)
-                                arc = os.path.relpath(full, DEFAULT_DIR)
-                                zf.write(full, arc)
+                        full = os.path.join(root_dir, fn)
+                        arc = os.path.relpath(full, repo)
+                        zf.write(full, arc)
+                        count += 1
             messagebox.showinfo(
                 "导出成功",
-                f"项目已导出到:\n{save_path}\n\n"
-                f"包含: {', '.join(include_files)} 及其他项目文件\n"
+                f"仓库「{repo_name}」已导出到:\n{save_path}\n\n"
+                f"共 {count} 个文件\n"
                 f"排除: .git/, __pycache__/, *.pyc, *.log")
         except Exception as exc:
             messagebox.showerror("导出失败", f"无法创建压缩包: {exc}")
