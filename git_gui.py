@@ -833,14 +833,183 @@ class RepoPanel:
                         out.append(ln)
                 return out
 
+            def detect_indent(lines):
+                counts = {"    ": 0, "  ": 0, "\t": 0}
+                for ln in lines:
+                    if ln.startswith("    "):
+                        counts["    "] += 1
+                    elif ln.startswith("  "):
+                        counts["  "] += 1
+                    elif ln.startswith("\t"):
+                        counts["\t"] += 1
+                best = max(counts, key=counts.get)
+                if counts[best] == 0:
+                    return None
+                return best
+
+            def convert_indent(line, target):
+                stripped = line.lstrip()
+                if not stripped:
+                    return line
+                leading = line[:len(line) - len(stripped)]
+                if "\t" in leading and target != "\t":
+                    return leading.replace("\t", target) + stripped
+                if " " in leading and target == "\t":
+                    return leading.replace("    ", "\t").replace("  ", "\t") + stripped
+                return line
+
+            def brackets_balanced(lines):
+                text = "".join(lines)
+                pairs = {"(": ")", "[": "]", "{": "}"}
+                stack = []
+                in_str = None
+                i = 0
+                while i < len(text):
+                    c = text[i]
+                    if in_str:
+                        if c == "\\":
+                            i += 2
+                            continue
+                        if c == in_str:
+                            in_str = None
+                        i += 1
+                        continue
+                    if c in ('"', "'"):
+                        in_str = c
+                    elif c in pairs:
+                        stack.append(c)
+                    elif c in pairs.values():
+                        if not stack:
+                            return False
+                        top = stack.pop()
+                        if pairs[top] != c:
+                            return False
+                    i += 1
+                return len(stack) == 0
+
             def merge_general(head, branch):
+                head_set = set(head)
+                branch_set = set(branch)
+                overlap = len(head_set & branch_set) / max(len(head_set | branch_set), 1)
+                if overlap < 0.2:
+                    return None
+                target_indent = detect_indent(head)
                 merged = list(head)
                 for b in branch:
                     if b not in merged:
-                        merged.append(b)
+                        if target_indent:
+                            merged.append(convert_indent(b, target_indent))
+                        else:
+                            merged.append(b)
                 merged = compress_blanks(merged)
                 merged = fix_newlines(merged)
+                if not brackets_balanced(merged):
+                    return None
                 return merged
+
+            def is_json_like(text):
+                s = text.strip()
+                return bool(s) and s[0] in "{["
+
+            def deep_merge_dict(a, b):
+                result = dict(a)
+                for k, v in b.items():
+                    if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                        result[k] = deep_merge_dict(result[k], v)
+                    else:
+                        result[k] = v
+                return result
+
+            def merge_json(head_text, branch_text):
+                import json
+                try:
+                    head_obj = json.loads(head_text)
+                    branch_obj = json.loads(branch_text)
+                except Exception:
+                    return None
+                if not isinstance(head_obj, dict) or not isinstance(branch_obj, dict):
+                    return None
+                merged = deep_merge_dict(head_obj, branch_obj)
+                try:
+                    out = json.dumps(merged, indent=2, ensure_ascii=False)
+                except Exception:
+                    return None
+                return [ln + "\n" for ln in out.splitlines()]
+
+            def is_yaml_like(text):
+                for ln in text.splitlines():
+                    if ln.startswith((" ", "\t", "#")):
+                        continue
+                    s = ln.strip()
+                    if not s:
+                        continue
+                    if ":" in ln:
+                        return True
+                return False
+
+            def is_ini_like(text):
+                for ln in text.splitlines():
+                    s = ln.strip()
+                    if s.startswith("[") and s.endswith("]"):
+                        return True
+                    if "=" in s and not s.startswith("#"):
+                        return True
+                return False
+
+            def merge_kv_block(head, branch, sep):
+                def top_keys(lines):
+                    keys = set()
+                    for ln in lines:
+                        if ln.startswith((" ", "\t", "#")):
+                            continue
+                        s = ln.strip()
+                        if not s:
+                            continue
+                        if sep in ln:
+                            keys.add(ln.split(sep, 1)[0].strip())
+                        elif s.startswith("[") and s.endswith("]"):
+                            keys.add(s)
+                    return keys
+                head_keys = top_keys(head)
+                branch_keys = top_keys(branch)
+                if not head_keys and not branch_keys:
+                    return None
+                merged = list(head)
+                for ln in branch:
+                    if ln.startswith((" ", "\t", "#")):
+                        continue
+                    s = ln.strip()
+                    if not s:
+                        continue
+                    if sep in ln:
+                        k = ln.split(sep, 1)[0].strip()
+                        if k not in head_keys:
+                            merged.append(ln)
+                    elif s.startswith("[") and s.endswith("]"):
+                        if s not in head_keys:
+                            merged.append(ln)
+                merged = compress_blanks(merged)
+                merged = fix_newlines(merged)
+                if not brackets_balanced(merged):
+                    return None
+                return merged
+
+            def try_config_merge(head, branch):
+                head_text = "".join(head)
+                branch_text = "".join(branch)
+                if is_json_like(head_text) and is_json_like(branch_text):
+                    r = merge_json(head_text, branch_text)
+                    if r is not None:
+                        return r
+                if is_yaml_like(head_text) and is_yaml_like(branch_text):
+                    r = merge_kv_block(head, branch, ":")
+                    if r is not None:
+                        return r
+                if is_ini_like(head_text) and is_ini_like(branch_text):
+                    r = merge_kv_block(head, branch, "=")
+                    if r is not None:
+                        return r
+                return None
 
             def merge_imports(head, branch):
                 head_imp = [ln for ln in head if is_import_line(ln)]
@@ -852,7 +1021,12 @@ class RepoPanel:
                     if bi not in merged_imp:
                         merged_imp.append(bi)
                 merged_non = do_merge(head_non, branch_non)
-                return merged_imp + merged_non
+                if merged_non is None:
+                    merged_non = list(head_non) + list(branch_non)
+                result = merged_imp + merged_non
+                if not brackets_balanced(result):
+                    return None
+                return result
 
             def do_merge(head, branch):
                 if head == branch:
@@ -869,6 +1043,9 @@ class RepoPanel:
                 branch_has_imp = any(is_import_line(ln) for ln in branch)
                 if head_has_imp or branch_has_imp:
                     return merge_imports(head, branch)
+                config_result = try_config_merge(head, branch)
+                if config_result is not None:
+                    return config_result
                 head_set = set(head)
                 branch_set = set(branch)
                 if head_set <= branch_set:
@@ -901,7 +1078,18 @@ class RepoPanel:
                         result.extend(branch)
                         break
                     i += 1
-                    result.extend(do_merge(head, branch))
+                    merged = do_merge(head, branch)
+                    if merged is None:
+                        result.append(marker)
+                        result.extend(head)
+                        result.append("=======\n")
+                        result.extend(branch)
+                        marker_stripped = marker.rstrip("\n")
+                        sep_part = marker_stripped.split(" ", 1)
+                        branch_name = sep_part[1] if len(sep_part) > 1 else "branch"
+                        result.append(">>>>>>> " + branch_name + "\n")
+                    else:
+                        result.extend(merged)
                 else:
                     result.append(lines[i])
                     i += 1
