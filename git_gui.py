@@ -18,8 +18,10 @@ STATE_FILE = os.path.join(os.path.expanduser("~"), ".git_gui_state.json")
 
 
 def run_git(repo, args, timeout=60):
-    actual = ["git", "-c", "core.quotepath=false"] + args
     display = shlex.join(["git"] + args)
+    if not repo:
+        return display, "未指定仓库目录。", -1
+    actual = ["git", "-c", "core.quotepath=false"] + args
     env = dict(os.environ, GIT_PAGER="cat", PAGER="cat")
     try:
         proc = subprocess.run(
@@ -30,6 +32,8 @@ def run_git(repo, args, timeout=60):
         return display, "未找到 git 命令，请先安装 Git。", -1
     except subprocess.TimeoutExpired:
         return display, "命令执行超时。", -1
+    except OSError as e:
+        return display, f"无法执行命令: {e}", -1
     text = ((proc.stdout or "") + (proc.stderr or "")).strip()
     return display, text, proc.returncode
 
@@ -44,7 +48,7 @@ class RepoPanel:
         self._cmd_hist_idx = len(self._cmd_history)
         self._build(parent)
         self.refresh_status()
-        self.cmd_entry.focus_set()
+
         self.root.after(100, self._poll_queue)
         self.root.after(2000, self._auto_refresh)
 
@@ -59,8 +63,9 @@ class RepoPanel:
         top = ttk.Frame(parent)
         top.pack(fill="x", padx=8, pady=(8, 0))
         ttk.Label(top, text="仓库路径:").pack(side="left")
-        ttk.Entry(top, textvariable=self.path_var).pack(
-            side="left", fill="x", expand=True, padx=6)
+        path_entry = ttk.Entry(top, textvariable=self.path_var)
+        path_entry.pack(side="left", fill="x", expand=True, padx=6)
+        path_entry.bind("<Return>", lambda e: self.refresh_status())
         ttk.Button(top, text="浏览…", command=self.choose_dir).pack(side="left")
         ttk.Button(top, text="刷新", command=self.refresh_status).pack(
             side="left", padx=(4, 0))
@@ -376,7 +381,7 @@ class RepoPanel:
         self._graph_font = tkfont.Font(family="Microsoft YaHei UI", size=9)
         box = ttk.LabelFrame(
             parent,
-            text="版本历史图（单击选中提交，右键：详情 / 回滚 / 检出；橙=HEAD 绿=分支）")
+            text="版本历史图（单击弹出操作菜单，右键：详情 / 回滚 / 检出；橙=HEAD 蓝=分支）")
         box.pack(fill="x", padx=8, pady=4)
         frame = ttk.Frame(box)
         frame.pack(fill="x", padx=6, pady=6)
@@ -388,6 +393,7 @@ class RepoPanel:
         self.graph.bind("<Button-1>", self._on_graph_click)
         self.graph.bind("<Button-3>", self._on_graph_menu)
         self.graph.bind("<Configure>", lambda e: self._draw_graph())
+        self.graph.bind("<MouseWheel>", lambda e: self.graph.yview_scroll(int(-e.delta / 120), "units"))
         scroll.pack(side="right", fill="y")
         self.graph.pack(side="left", fill="both", expand=True)
 
@@ -535,6 +541,7 @@ class RepoPanel:
         menu.add_command(label="复制完整哈希",
                          command=lambda: self._copy_hash(node))
         menu.tk_popup(event.x_root, event.y_root)
+        menu.destroy()
 
     def _on_graph_menu(self, event):
         node = self._hit_node(self.graph.canvasx(event.x),
@@ -557,6 +564,7 @@ class RepoPanel:
         menu.add_command(label="复制完整哈希",
                          command=lambda: self._copy_hash(node))
         menu.tk_popup(event.x_root, event.y_root)
+        menu.destroy()
 
     def _select_commit(self, node):
         self._selected = node
@@ -604,7 +612,12 @@ class RepoPanel:
             args=(repo, args, slow, on_success), daemon=True).start()
 
     def _worker(self, repo, args, slow, on_success):
-        display, text, code = run_git(repo, args, timeout=600 if slow else 60)
+        try:
+            display, text, code = run_git(repo, args, timeout=600 if slow else 60)
+        except Exception as e:
+            display = shlex.join(["git"] + args)
+            self._result_q.put((display, str(e), -1, args, on_success, repo))
+            return
         self._result_q.put((display, text, code, args, on_success, repo))
 
     def _poll_queue(self):
@@ -667,7 +680,7 @@ class RepoPanel:
         sel = self.file_list.curselection()
         if not sel:
             return
-        self.run(["diff", "--", self._file_name(sel[0])])
+        self.run(["diff", "HEAD", "--", self._file_name(sel[0])])
 
     def commit(self):
         msg = simpledialog.askstring("提交", "请输入提交信息:", parent=self.root)
@@ -1098,17 +1111,15 @@ class RepoPanel:
                         result.append("=======\n")
                         result.extend(branch)
                         break
+                    end_marker = lines[i]
                     i += 1
                     merged = do_merge(head, branch)
                     if merged is None:
                         result.append(marker)
-                        result.extend(head)
+                        result.extend(fix_newlines(head))
                         result.append("=======\n")
-                        result.extend(branch)
-                        marker_stripped = marker.rstrip("\n")
-                        sep_part = marker_stripped.split(" ", 1)
-                        branch_name = sep_part[1] if len(sep_part) > 1 else "branch"
-                        result.append(">>>>>>> " + branch_name + "\n")
+                        result.extend(fix_newlines(branch))
+                        result.append(end_marker)
                     else:
                         result.extend(merged)
                 else:
@@ -1144,11 +1155,12 @@ class RepoPanel:
         win.grab_set()
         win.geometry("960x640")
         names = [r[0] for r in file_results]
-        sel = tk.StringVar(value=names[0])
+        display_values = [f"{i}: {n}" for i, n in enumerate(names)]
+        sel = tk.StringVar(value=display_values[0] if display_values else "")
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=8, pady=(8, 2))
         ttk.Label(bar, text="文件:").pack(side="left", padx=(0, 4))
-        box = ttk.Combobox(bar, textvariable=sel, values=names,
+        box = ttk.Combobox(bar, textvariable=sel, values=display_values,
                            state="readonly", width=54)
         box.pack(side="left")
         content = ttk.Frame(win)
@@ -1169,11 +1181,17 @@ class RepoPanel:
         left.pack(side="left", fill="both", expand=True)
         rsb.pack(side="right", fill="y")
         right.pack(side="left", fill="both", expand=True)
-        data = {r[0]: (r[1], r[2]) for r in file_results}
+        data = [(r[1], r[2]) for r in file_results]
 
         def show(_event=None):
-            name = sel.get()
-            orig, new = data.get(name, ("", ""))
+            val = sel.get()
+            try:
+                idx = int(val.split(":", 1)[0])
+            except (ValueError, IndexError):
+                idx = 0
+            if idx < 0 or idx >= len(data):
+                idx = 0
+            orig, new = data[idx]
             left.delete("1.0", "end")
             right.delete("1.0", "end")
             left.insert("1.0", orig)
@@ -1206,8 +1224,8 @@ class RepoPanel:
                 except OSError as e:
                     self.append_output(f"无法写入 {rel}: {e}\n", "fail")
                     continue
-            self.run(["add"] + names, repo=repo)
-            self.append_output("已暂存所有自动解决冲突的文件，请点击「提交」完成合并。\n\n", "ok")
+            self.run(["add"] + names, repo=repo,
+                     on_success=lambda: self.append_output("已暂存所有自动解决冲突的文件，请点击「提交」完成合并。\n\n", "ok"))
         elif result and result[0] == "discard":
             self.append_output("已保留原始冲突标记，请手动解决后「暂存全部」→「提交」。\n\n", "fail")
 
@@ -1302,9 +1320,15 @@ class GitGUI:
             tabs = [{"path": DEFAULT_DIR, "cmd_history": []}]
             active = 0
         for t in tabs:
-            self._new_tab(t["path"], t.get("cmd_history", []))
+            self._new_tab(t["path"], t.get("cmd_history", []), _save=False)
         if active < len(tabs):
             self.nb.select(active)
+        self._save_state()
+        current = self.nb.select()
+        if current:
+            panel = self._panels.get(str(current))
+            if panel:
+                panel.cmd_entry.focus_set()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _load_state(self):
@@ -1341,7 +1365,7 @@ class GitGUI:
         self._save_state()
         self.root.destroy()
 
-    def _new_tab(self, path=None, cmd_history=None):
+    def _new_tab(self, path=None, cmd_history=None, _save=True):
         if path is None:
             path = filedialog.askdirectory(initialdir=DEFAULT_DIR)
             if not path:
@@ -1352,11 +1376,12 @@ class GitGUI:
         self.nb.add(frame, text=name)
         self.nb.select(frame)
         self._panels[str(frame)] = panel
-        self._save_state()
+        if _save:
+            self._save_state()
 
     def _close_tab(self):
         current = self.nb.select()
-        if current is None:
+        if not current:
             return
         if self.nb.index("end") <= 1:
             messagebox.showinfo("提示", "至少保留一个标签页。")
