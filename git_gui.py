@@ -71,9 +71,18 @@ class RepoPanel:
         path_entry = ttk.Entry(top, textvariable=self.path_var)
         path_entry.pack(side="left", fill="x", expand=True, padx=6)
         path_entry.bind("<Return>", lambda e: self.refresh_status())
-        ttk.Button(top, text="浏览…", command=self.choose_dir).pack(side="left")
-        ttk.Button(top, text="刷新", command=self.refresh_status).pack(
-            side="left", padx=(4, 0))
+        btn_new = ttk.Button(top, text="新建仓库", command=self.new_repo)
+        btn_new.pack(side="left")
+        self._add_tooltip(btn_new, "git init + git add",
+                          "选择目录并勾选文件，在该目录初始化 Git 仓库并加入暂存")
+        btn_open = ttk.Button(top, text="打开已有仓库", command=self.open_repo)
+        btn_open.pack(side="left", padx=4)
+        self._add_tooltip(btn_open, "cd <repo> + git status",
+                          "选择一个已有的 Git 仓库目录并打开")
+        btn_refresh = ttk.Button(top, text="刷新", command=self.refresh_status)
+        btn_refresh.pack(side="left", padx=(4, 0))
+        self._add_tooltip(btn_refresh, "git status",
+                          "重新读取当前仓库的状态、分支和提交历史")
         self.state_var = tk.StringVar(value="就绪")
         ttk.Label(parent, textvariable=self.state_var,
                   foreground="#606060").pack(anchor="w", padx=10, pady=(2, 0))
@@ -664,12 +673,122 @@ class RepoPanel:
     def run_status(self):
         self.run(["status"])
 
-    def choose_dir(self):
+    def new_repo(self):
         d = filedialog.askdirectory(
+            title="选择新建仓库的目录（将在此目录初始化 Git 仓库）",
             initialdir=self.path_var.get() or DEFAULT_DIR)
-        if d:
-            self.path_var.set(d)
-            self.refresh_status()
+        if not d:
+            return
+        if self.is_repo(d):
+            if messagebox.askyesno(
+                    "目录已是仓库",
+                    f"「{d}」已经是 Git 仓库。\n是否直接打开它？"):
+                self.path_var.set(d)
+                self.refresh_status()
+            return
+        files = self._select_files_dialog(d)
+        if files is None:
+            return
+        self.path_var.set(d)
+
+        def on_init_success():
+            if files:
+                self.run(
+                    ["add", "--"] + files,
+                    on_success=lambda: self.append_output(
+                        f"仓库已在 {d} 初始化，已暂存 {len(files)} 个文件。\n"
+                        "请点击「提交」完成初始提交。\n\n", "ok"))
+            else:
+                self.append_output(
+                    f"仓库已在 {d} 初始化（空仓库）。\n"
+                    "可暂存文件后点击「提交」。\n\n", "ok")
+
+        self.run(["init"], require_repo=False, on_success=on_init_success)
+
+    def open_repo(self):
+        d = filedialog.askdirectory(
+            title="选择已有的 Git 仓库目录",
+            initialdir=self.path_var.get() or DEFAULT_DIR)
+        if not d:
+            return
+        if not self.is_repo(d):
+            if messagebox.askyesno(
+                    "不是 Git 仓库",
+                    f"「{d}」不是 Git 仓库。\n是否在此目录初始化新仓库？"):
+                self.path_var.set(d)
+                self.run(["init"], require_repo=False,
+                         on_success=lambda: self.append_output(
+                             f"已在 {d} 初始化新仓库。\n\n", "ok"))
+            return
+        self.path_var.set(d)
+        self.refresh_status()
+        self.append_output(f"已打开仓库: {d}\n\n", "ok")
+
+    def _select_files_dialog(self, directory):
+        win = tk.Toplevel(self.root)
+        win.title("选择要加入仓库的文件")
+        win.transient(self.root)
+        win.grab_set()
+        win.geometry("520x420")
+        win.resizable(True, True)
+        ttk.Label(win, text=f"目录: {directory}", foreground="#606060").pack(
+            padx=8, pady=(8, 2), anchor="w")
+        ttk.Label(win, text="勾选要加入 Git 仓库的文件（默认全选）:").pack(
+            padx=8, pady=(0, 4), anchor="w")
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        listbox = tk.Listbox(frame, selectmode="multiple",
+                             font=("Consolas", 10), height=14)
+        sb = ttk.Scrollbar(frame, command=listbox.yview)
+        listbox.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        listbox.pack(side="left", fill="both", expand=True)
+        all_files = []
+        try:
+            for item in sorted(os.listdir(directory)):
+                full = os.path.join(directory, item)
+                if os.path.isfile(full) and not item.startswith("."):
+                    all_files.append(item)
+                    listbox.insert("end", item)
+        except OSError as e:
+            messagebox.showerror("读取目录失败", str(e), parent=win)
+            win.destroy()
+            return None
+        for i in range(len(all_files)):
+            listbox.select_set(i)
+        if not all_files:
+            ttk.Label(win, text="（目录为空，将创建空仓库）",
+                      foreground="#999999").pack(padx=8, pady=4)
+        result = []
+
+        def ok():
+            sel = listbox.curselection()
+            result.append([all_files[i] for i in sel])
+            win.destroy()
+
+        def cancel():
+            result.append(None)
+            win.destroy()
+
+        def select_all():
+            listbox.select_set(0, "end")
+
+        def deselect_all():
+            listbox.select_clear(0, "end")
+
+        btns = ttk.Frame(win)
+        btns.pack(pady=(4, 8))
+        ttk.Button(btns, text="全选", command=select_all).pack(
+            side="left", padx=4)
+        ttk.Button(btns, text="全不选", command=deselect_all).pack(
+            side="left", padx=4)
+        ttk.Button(btns, text="确定", command=ok).pack(
+            side="left", padx=4)
+        ttk.Button(btns, text="取消", command=cancel).pack(
+            side="left", padx=4)
+        win.protocol("WM_DELETE_WINDOW", cancel)
+        win.wait_window()
+        return result[0] if result else None
 
     def _file_name(self, index):
         name = self.file_list.get(index)[4:]
