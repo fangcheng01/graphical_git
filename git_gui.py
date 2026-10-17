@@ -8,6 +8,7 @@ import os
 import queue
 import shlex
 import subprocess
+import zipfile
 import threading
 import time
 import tkinter as tk
@@ -1051,6 +1052,8 @@ class GitGUI:
                    command=self._new_tab).pack(side="left")
         ttk.Button(top, text="× 关闭当前标签",
                    command=self._close_tab).pack(side="left", padx=4)
+        ttk.Button(top, text="导出压缩包",
+                   command=self._export_zip).pack(side="left", padx=4)
         self.nb = ttk.Notebook(root)
         self.nb.pack(fill="both", expand=True, padx=8, pady=4)
         self._panels = {}
@@ -1128,6 +1131,51 @@ class GitGUI:
         self.nb.forget(current)
         self._panels.pop(str(current), None)
         self._save_state()
+
+    def _export_zip(self):
+        save_path = filedialog.asksaveasfilename(
+            title="导出项目压缩包",
+            defaultextension=".zip",
+            initialfile="git_gui_project.zip",
+            filetypes=[("ZIP 压缩包", "*.zip")])
+        if not save_path:
+            return
+        include_files = ["git_gui.py", "conflict_agent.py", ".gitignore"]
+        exclude_exts = {".pyc", ".log"}
+        exclude_dirs = {"__pycache__", ".git"}
+        try:
+            with zipfile.ZipFile(save_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for fname in include_files:
+                    fpath = os.path.join(DEFAULT_DIR, fname)
+                    if os.path.isfile(fpath):
+                        zf.write(fpath, fname)
+                for item in os.listdir(DEFAULT_DIR):
+                    if item in include_files or item in exclude_dirs:
+                        continue
+                    fpath = os.path.join(DEFAULT_DIR, item)
+                    if os.path.isfile(fpath):
+                        ext = os.path.splitext(item)[1].lower()
+                        if ext in exclude_exts:
+                            continue
+                        zf.write(fpath, item)
+                    elif os.path.isdir(fpath) and item not in exclude_dirs:
+                        for root_dir, dirs, files in os.walk(fpath):
+                            dirs[:] = [d for d in dirs
+                                       if d not in exclude_dirs]
+                            for fn in files:
+                                ext = os.path.splitext(fn)[1].lower()
+                                if ext in exclude_exts:
+                                    continue
+                                full = os.path.join(root_dir, fn)
+                                arc = os.path.relpath(full, DEFAULT_DIR)
+                                zf.write(full, arc)
+            messagebox.showinfo(
+                "导出成功",
+                f"项目已导出到:\n{save_path}\n\n"
+                f"包含: {', '.join(include_files)} 及其他项目文件\n"
+                f"排除: .git/, __pycache__/, *.pyc, *.log")
+        except Exception as exc:
+            messagebox.showerror("导出失败", f"无法创建压缩包: {exc}")
 
 
 def main():
