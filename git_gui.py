@@ -806,6 +806,77 @@ class RepoPanel:
             result = []
             i = 0
             n = len(lines)
+
+            def is_import_line(line):
+                s = line.strip()
+                if not s:
+                    return False
+                return s.startswith(("import ", "from ", "#include"))
+
+            def compress_blanks(lst):
+                out = []
+                prev_blank = False
+                for ln in lst:
+                    cur_blank = not ln.strip()
+                    if cur_blank and prev_blank:
+                        continue
+                    out.append(ln)
+                    prev_blank = cur_blank
+                return out
+
+            def fix_newlines(lst):
+                out = []
+                for ln in lst:
+                    if ln and not ln.endswith("\n"):
+                        out.append(ln + "\n")
+                    else:
+                        out.append(ln)
+                return out
+
+            def merge_general(head, branch):
+                merged = list(head)
+                for b in branch:
+                    if b not in merged:
+                        merged.append(b)
+                merged = compress_blanks(merged)
+                merged = fix_newlines(merged)
+                return merged
+
+            def merge_imports(head, branch):
+                head_imp = [ln for ln in head if is_import_line(ln)]
+                head_non = [ln for ln in head if not is_import_line(ln)]
+                branch_imp = [ln for ln in branch if is_import_line(ln)]
+                branch_non = [ln for ln in branch if not is_import_line(ln)]
+                merged_imp = list(head_imp)
+                for bi in branch_imp:
+                    if bi not in merged_imp:
+                        merged_imp.append(bi)
+                merged_non = do_merge(head_non, branch_non)
+                return merged_imp + merged_non
+
+            def do_merge(head, branch):
+                if head == branch:
+                    return head
+                head_empty = all(not ln.strip() for ln in head)
+                branch_empty = all(not ln.strip() for ln in branch)
+                if head_empty and branch_empty:
+                    return []
+                if head_empty:
+                    return branch
+                if branch_empty:
+                    return head
+                head_has_imp = any(is_import_line(ln) for ln in head)
+                branch_has_imp = any(is_import_line(ln) for ln in branch)
+                if head_has_imp or branch_has_imp:
+                    return merge_imports(head, branch)
+                head_set = set(head)
+                branch_set = set(branch)
+                if head_set <= branch_set:
+                    return branch
+                if branch_set <= head_set:
+                    return head
+                return merge_general(head, branch)
+
             while i < n:
                 if lines[i].startswith("<<<<<<<"):
                     marker = lines[i]
@@ -830,20 +901,7 @@ class RepoPanel:
                         result.extend(branch)
                         break
                     i += 1
-                    head_text = "".join(head)
-                    branch_text = "".join(branch)
-                    if not head_text.strip() and not branch_text.strip():
-                        pass
-                    elif not head_text.strip():
-                        result.extend(branch)
-                    elif not branch_text.strip():
-                        result.extend(head)
-                    else:
-                        merged = list(head)
-                        for b in branch:
-                            if b not in merged:
-                                merged.append(b)
-                        result.extend(merged)
+                    result.extend(do_merge(head, branch))
                 else:
                     result.append(lines[i])
                     i += 1
